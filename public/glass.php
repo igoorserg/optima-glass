@@ -16,6 +16,21 @@ if ($code === '') {
     exit('Код стекла не указан.');
 }
 
+<div id="qrcode"></div>
+
+<p>
+    <strong><?= e($glass['code']) ?></strong>
+</p>
+
+<script>
+new QRCode(document.getElementById('qrcode'), {
+    text: window.location.origin +
+        '/glass.php?code=<?= urlencode($glass['code']) ?>',
+    width: 220,
+    height: 220
+});
+</script>
+
 $stmt = $db->prepare("
     SELECT
         g.*,

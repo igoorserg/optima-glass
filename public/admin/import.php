@@ -1,5 +1,7 @@
 <?php
 
+declare(strict_types=1);
+
 session_start();
 
 if (($_SESSION['user_role'] ?? '') !== 'admin') {
@@ -18,9 +20,16 @@ function e(?string $value): string
     return htmlspecialchars($value ?? '', ENT_QUOTES, 'UTF-8');
 }
 
+/**
+ * Определяем разделитель CSV/TXT.
+ */
 function detectDelimiter(string $line): string
 {
-    $delimiters = [';', ',', "\t"];
+    $delimiters = [
+        ';',
+        ',',
+        "\t"
+    ];
 
     $best = ';';
     $max = 0;
@@ -37,146 +46,458 @@ function detectDelimiter(string $line): string
     return $best;
 }
 
+/**
+ * Нормализация заголовка.
+ */
 function normalizeHeader(string $value): string
 {
     $value = trim($value);
+
+    // UTF-8 BOM
     $value = preg_replace('/^\xEF\xBB\xBF/', '', $value);
 
-    return strtolower($value);
+    return strtolower(trim($value));
+}
+
+/**
+ * Нормализация значения.
+ */
+function normalizeValue(mixed $value): string
+{
+    if ($value === null) {
+        return '';
+    }
+
+    if (is_bool($value)) {
+        return $value ? '1' : '0';
+    }
+
+    return trim((string)$value);
+}
+
+/**
+ * Читаем CSV/TXT.
+ */
+function readCsvFile(string $filename): array
+{
+    $rows = [];
+
+    $handle = fopen($filename, 'r');
+
+    if ($handle === false) {
+        throw new RuntimeException('Не удалось открыть CSV/TXT файл.');
+    }
+
+    $firstLine = fgets($handle);
+
+    if ($firstLine === false) {
+        fclose($handle);
+        throw new RuntimeException('Файл пустой.');
+    }
+
+    $delimiter = detectDelimiter($firstLine);
+
+    rewind($handle);
+
+    $headers = fgetcsv($handle, 0, $delimiter);
+
+    if ($headers === false) {
+        fclose($handle);
+        throw new RuntimeException('Не удалось прочитать заголовок файла.');
+    }
+
+    $headers = array_map(
+        static fn($header) => normalizeHeader((string)$header),
+        $headers
+    );
+
+    $lineNumber = 1;
+
+    while (($row = fgetcsv($handle, 0, $delimiter)) !== false) {
+
+        $lineNumber++;
+
+        if (
+            count($row) === 1 &&
+            trim((string)($row[0] ?? '')) === ''
+        ) {
+            continue;
+        }
+
+        $row = array_pad($row, count($headers), '');
+
+        $data = [
+            '_line' => $lineNumber
+        ];
+
+        foreach ($headers as $index => $header) {
+            if ($header === '') {
+                continue;
+            }
+
+            $data[$header] = normalizeValue(
+                $row[$index] ?? ''
+            );
+        }
+
+        $rows[] = $data;
+    }
+
+    fclose($handle);
+
+    return [
+        'headers' => $headers,
+        'rows' => $rows
+    ];
+}
+
+/**
+ * Читаем XLSX через PhpSpreadsheet.
+ */
+function readXlsxFile(string $filename): array
+{
+    $autoload = __DIR__ . '/../../vendor/autoload.php';
+
+    if (!file_exists($autoload)) {
+        throw new RuntimeException(
+            'Не найден vendor/autoload.php. Установите PhpSpreadsheet через Composer.'
+        );
+    }
+
+    require_once $autoload;
+
+    if (!class_exists(
+        'PhpOffice\\PhpSpreadsheet\\Reader\\Xlsx'
+    )) {
+        throw new RuntimeException(
+            'PhpSpreadsheet не установлен.'
+        );
+    }
+
+    $reader = new \PhpOffice\PhpSpreadsheet\Reader\Xlsx();
+
+    $reader->setReadDataOnly(true);
+
+    try {
+        $spreadsheet = $reader->load($filename);
+    } catch (Throwable $e) {
+        throw new RuntimeException(
+            'Не удалось прочитать XLSX файл: ' . $e->getMessage()
+        );
+    }
+
+    $sheet = $spreadsheet->getActiveSheet();
+
+    $highestRow = $sheet->getHighestDataRow();
+    $highestColumn = $sheet->getHighestDataColumn();
+
+    if ($highestRow < 1) {
+        throw new RuntimeException('XLSX файл пустой.');
+    }
+
+    $highestColumnIndex =
+        \PhpOffice\PhpSpreadsheet\Cell\Coordinate::columnIndexFromString(
+            $highestColumn
+        );
+
+    $headers = [];
+
+    for ($column = 1; $column <= $highestColumnIndex; $column++) {
+
+        $value = $sheet->getCellByColumnAndRow(
+            $column,
+            1
+        )->getValue();
+
+        $headers[] = normalizeHeader(
+            (string)$value
+        );
+    }
+
+    $rows = [];
+
+    for ($rowNumber = 2; $rowNumber <= $highestRow; $rowNumber++) {
+
+        $data = [
+            '_line' => $rowNumber
+        ];
+
+        $hasData = false;
+
+        for ($column = 1; $column <= $highestColumnIndex; $column++) {
+
+            $header = $headers[$column - 1] ?? '';
+
+            if ($header === '') {
+                continue;
+            }
+
+            $value = $sheet->getCellByColumnAndRow(
+                $column,
+                $rowNumber
+            )->getCalculatedValue();
+
+            $value = normalizeValue($value);
+
+            if ($value !== '') {
+                $hasData = true;
+            }
+
+            $data[$header] = $value;
+        }
+
+        if (!$hasData) {
+            continue;
+        }
+
+        $rows[] = $data;
+    }
+
+    return [
+        'headers' => $headers,
+        'rows' => $rows
+    ];
+}
+
+/**
+ * Проверка обязательных колонок.
+ */
+function validateHeaders(array $headers): array
+{
+    $required = [
+        'order_number',
+        'glass_type',
+        'thickness',
+        'width',
+        'height',
+        'quantity'
+    ];
+
+    $errors = [];
+
+    foreach ($required as $column) {
+
+        if (!in_array($column, $headers, true)) {
+            $errors[] =
+                "Отсутствует обязательная колонка: {$column}";
+        }
+    }
+
+    return $errors;
+}
+
+/**
+ * Преобразование строк импорта в нормализованные записи.
+ */
+function validateRows(
+    array $rows,
+    array &$errors
+): array {
+
+    $result = [];
+
+    foreach ($rows as $row) {
+
+        $lineNumber = (int)($row['_line'] ?? 0);
+
+        $orderNumber =
+            normalizeValue($row['order_number'] ?? '');
+
+        $glassType =
+            normalizeValue($row['glass_type'] ?? '');
+
+        $thickness =
+            normalizeValue($row['thickness'] ?? '');
+
+        $width =
+            normalizeValue($row['width'] ?? '');
+
+        $height =
+            normalizeValue($row['height'] ?? '');
+
+        $quantity =
+            normalizeValue($row['quantity'] ?? '');
+
+        $comment =
+            normalizeValue($row['comment'] ?? '');
+
+        if ($orderNumber === '') {
+
+            $errors[] =
+                "Строка {$lineNumber}: не указан order_number.";
+
+            continue;
+        }
+
+        if ($glassType === '') {
+
+            $errors[] =
+                "Строка {$lineNumber}: не указан glass_type.";
+
+            continue;
+        }
+
+        if (
+            !is_numeric($thickness) ||
+            (float)$thickness <= 0
+        ) {
+
+            $errors[] =
+                "Строка {$lineNumber}: неправильная толщина.";
+
+            continue;
+        }
+
+        if (
+            !ctype_digit($width) ||
+            (int)$width <= 0
+        ) {
+
+            $errors[] =
+                "Строка {$lineNumber}: неправильная ширина.";
+
+            continue;
+        }
+
+        if (
+            !ctype_digit($height) ||
+            (int)$height <= 0
+        ) {
+
+            $errors[] =
+                "Строка {$lineNumber}: неправильная высота.";
+
+            continue;
+        }
+
+        if (
+            !ctype_digit($quantity) ||
+            (int)$quantity <= 0
+        ) {
+
+            $errors[] =
+                "Строка {$lineNumber}: неправильное количество.";
+
+            continue;
+        }
+
+        $result[] = [
+            'line' => $lineNumber,
+            'order_number' => $orderNumber,
+            'glass_type' => $glassType,
+            'thickness' => (float)$thickness,
+            'width' => (int)$width,
+            'height' => (int)$height,
+            'quantity' => (int)$quantity,
+            'comment' => $comment
+        ];
+    }
+
+    return $result;
 }
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     if (
         !isset($_FILES['import_file']) ||
-        $_FILES['import_file']['error'] !== UPLOAD_ERR_OK
+        !is_array($_FILES['import_file'])
     ) {
-        $errors[] = 'Не удалось загрузить файл.';
+
+        $errors[] = 'Файл не выбран.';
+
+    } elseif (
+        ($_FILES['import_file']['error'] ?? UPLOAD_ERR_NO_FILE)
+        !== UPLOAD_ERR_OK
+    ) {
+
+        $uploadError =
+            (int)($_FILES['import_file']['error'] ?? -1);
+
+        $errors[] =
+            "Ошибка загрузки файла. Код: {$uploadError}";
+
     } else {
 
         $file = $_FILES['import_file'];
 
-        $extension = strtolower(pathinfo($file['name'], PATHINFO_EXTENSION));
+        $extension =
+            strtolower(
+                pathinfo(
+                    (string)$file['name'],
+                    PATHINFO_EXTENSION
+                )
+            );
 
-        if (!in_array($extension, ['csv', 'txt'], true)) {
-            $errors[] = 'Разрешены только файлы CSV и TXT.';
+        $allowedExtensions = [
+            'csv',
+            'txt',
+            'xlsx'
+        ];
+
+        if (
+            !in_array(
+                $extension,
+                $allowedExtensions,
+                true
+            )
+        ) {
+
+            $errors[] =
+                'Разрешены только файлы CSV, TXT и XLSX.';
+
         } else {
 
-            $handle = fopen($file['tmp_name'], 'r');
+            try {
 
-            if ($handle === false) {
-                $errors[] = 'Не удалось открыть файл.';
-            } else {
+                if ($extension === 'xlsx') {
 
-                $firstLine = fgets($handle);
+                    if (!class_exists('ZipArchive')) {
 
-                if ($firstLine === false) {
-                    $errors[] = 'Файл пустой.';
+                        /*
+                         * PhpSpreadsheet использует ZIP
+                         * для чтения XLSX.
+                         */
+                        throw new RuntimeException(
+                            'На сервере отсутствует расширение PHP ZipArchive. ' .
+                            'Для импорта XLSX необходимо включить PHP extension zip.'
+                        );
+                    }
+
+                    $parsed =
+                        readXlsxFile(
+                            (string)$file['tmp_name']
+                        );
+
                 } else {
 
-                    $delimiter = detectDelimiter($firstLine);
-
-                    rewind($handle);
-
-                    $headers = fgetcsv($handle, 0, $delimiter);
-
-                    if (!$headers) {
-                        $errors[] = 'Не удалось прочитать заголовок файла.';
-                    } else {
-
-                        $headers = array_map('normalizeHeader', $headers);
-
-                        $required = [
-                            'order_number',
-                            'glass_type',
-                            'thickness',
-                            'width',
-                            'height',
-                            'quantity'
-                        ];
-
-                        foreach ($required as $requiredColumn) {
-                            if (!in_array($requiredColumn, $headers, true)) {
-                                $errors[] = "Отсутствует обязательная колонка: {$requiredColumn}";
-                            }
-                        }
-
-                        if (!$errors) {
-
-                            $indexes = array_flip($headers);
-
-                            $lineNumber = 1;
-
-                            while (($row = fgetcsv($handle, 0, $delimiter)) !== false) {
-
-                                $lineNumber++;
-
-                                if (count($row) === 1 && trim((string)$row[0]) === '') {
-                                    continue;
-                                }
-
-                                $row = array_pad($row, count($headers), '');
-
-                                $data = [];
-
-                                foreach ($headers as $index => $header) {
-                                    $data[$header] = trim((string)($row[$index] ?? ''));
-                                }
-
-                                $orderNumber = $data['order_number'] ?? '';
-                                $glassType = $data['glass_type'] ?? '';
-                                $thickness = $data['thickness'] ?? '';
-                                $width = $data['width'] ?? '';
-                                $height = $data['height'] ?? '';
-                                $quantity = $data['quantity'] ?? '';
-                                $comment = $data['comment'] ?? '';
-
-                                if ($orderNumber === '') {
-                                    $errors[] = "Строка {$lineNumber}: не указан order_number.";
-                                    continue;
-                                }
-
-                                if ($glassType === '') {
-                                    $errors[] = "Строка {$lineNumber}: не указан glass_type.";
-                                    continue;
-                                }
-
-                                if (!is_numeric($thickness) || (float)$thickness <= 0) {
-                                    $errors[] = "Строка {$lineNumber}: неправильная толщина.";
-                                    continue;
-                                }
-
-                                if (!ctype_digit($width) || (int)$width <= 0) {
-                                    $errors[] = "Строка {$lineNumber}: неправильная ширина.";
-                                    continue;
-                                }
-
-                                if (!ctype_digit($height) || (int)$height <= 0) {
-                                    $errors[] = "Строка {$lineNumber}: неправильная высота.";
-                                    continue;
-                                }
-
-                                if (!ctype_digit($quantity) || (int)$quantity <= 0) {
-                                    $errors[] = "Строка {$lineNumber}: неправильное количество.";
-                                    continue;
-                                }
-
-                                $preview[] = [
-                                    'line' => $lineNumber,
-                                    'order_number' => $orderNumber,
-                                    'glass_type' => $glassType,
-                                    'thickness' => (float)$thickness,
-                                    'width' => (int)$width,
-                                    'height' => (int)$height,
-                                    'quantity' => (int)$quantity,
-                                    'comment' => $comment
-                                ];
-                            }
-                        }
-                    }
+                    $parsed =
+                        readCsvFile(
+                            (string)$file['tmp_name']
+                        );
                 }
 
-                fclose($handle);
+                $headers = $parsed['headers'];
+                $rows = $parsed['rows'];
+
+                $errors = array_merge(
+                    $errors,
+                    validateHeaders($headers)
+                );
+
+                if (!$errors) {
+
+                    $preview =
+                        validateRows(
+                            $rows,
+                            $errors
+                        );
+                }
+
+            } catch (Throwable $e) {
+
+                $errors[] =
+                    'Ошибка чтения файла: ' .
+                    $e->getMessage();
             }
         }
     }
@@ -190,28 +511,55 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $db->beginTransaction();
 
+            /*
+             * Ищем заказ.
+             */
             $findOrder = $db->prepare(
-                'SELECT id FROM orders WHERE order_number = ?'
-            );
-
-            $createOrder = $db->prepare(
-                'INSERT INTO orders (order_number, status)
-                 VALUES (?, "new")'
-            );
-
-            $findGlassType = $db->prepare(
-                'SELECT id, code, name
-                 FROM glass_types
-                 WHERE code = ? OR name = ?
+                'SELECT id
+                 FROM orders
+                 WHERE order_number = ?
                  LIMIT 1'
             );
 
-            $getNextCode = $db->query(
-                "SELECT COALESCE(MAX(id), 0) + 1 FROM glasses"
+            /*
+             * Создаём заказ.
+             */
+            $createOrder = $db->prepare(
+                'INSERT INTO orders (
+                    order_number,
+                    status
+                )
+                VALUES (
+                    ?,
+                    "new"
+                )'
             );
 
-            $nextId = (int)$getNextCode->fetchColumn();
+            /*
+             * Ищем тип стекла.
+             */
+            $findGlassType = $db->prepare(
+                'SELECT id, code, name
+                 FROM glass_types
+                 WHERE code = ?
+                    OR name = ?
+                 LIMIT 1'
+            );
 
+            /*
+             * Следующий ID стекла.
+             */
+            $getNextCode = $db->query(
+                'SELECT COALESCE(MAX(id), 0) + 1
+                 FROM glasses'
+            );
+
+            $nextId =
+                (int)$getNextCode->fetchColumn();
+
+            /*
+             * Создание стекла.
+             */
             $insertGlass = $db->prepare(
                 'INSERT INTO glasses (
                     code,
@@ -226,11 +574,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     thickness
                 )
                 VALUES (
-                    ?, ?, ?, ?, ?, ?, "created", ?, ?, ?
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    ?,
+                    "created",
+                    ?,
+                    ?,
+                    ?
                 )'
             );
 
             $imported = 0;
+            $ordersCreated = 0;
 
             foreach ($preview as $item) {
 
@@ -241,7 +599,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $item['order_number']
                 ]);
 
-                $orderId = $findOrder->fetchColumn();
+                $orderId =
+                    $findOrder->fetchColumn();
 
                 /*
                  * Если заказа нет — создаём.
@@ -252,30 +611,50 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $item['order_number']
                     ]);
 
-                    $orderId = (int)$db->lastInsertId();
+                    $orderId =
+                        (int)$db->lastInsertId();
+
+                    $ordersCreated++;
                 }
 
                 /*
-                 * Проверяем тип стекла.
+                 * Ищем тип стекла.
                  */
                 $findGlassType->execute([
                     $item['glass_type'],
                     $item['glass_type']
                 ]);
 
-                $glassTypeRow = $findGlassType->fetch();
+                $glassTypeRow =
+                    $findGlassType->fetch();
 
                 if (!$glassTypeRow) {
+
                     throw new RuntimeException(
-                        'Не найден тип стекла: ' . $item['glass_type']
+                        'Строка ' .
+                        $item['line'] .
+                        ': не найден тип стекла "' .
+                        $item['glass_type'] .
+                        '".'
                     );
                 }
 
                 /*
-                 * Создаём отдельную запись для каждого стекла.
+                 * Создаём отдельную запись
+                 * для каждого стекла.
                  */
-                for ($i = 0; $i < $item['quantity']; $i++) {
+                for (
+                    $i = 0;
+                    $i < $item['quantity'];
+                    $i++
+                ) {
 
+                    /*
+                     * Код:
+                     * GLASS-000001
+                     * GLASS-000002
+                     * ...
+                     */
                     $code = sprintf(
                         'GLASS-%06d',
                         $nextId
@@ -300,7 +679,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $db->commit();
 
-            $message = "Импорт завершён. Добавлено стекол: {$imported}";
+            $message =
+                "Импорт завершён. " .
+                "Добавлено стекол: {$imported}. " .
+                "Создано новых заказов: {$ordersCreated}.";
 
             $preview = [];
 
@@ -310,8 +692,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $db->rollBack();
             }
 
-            $errors[] = 'Ошибка импорта: ' . $e->getMessage();
+            $errors[] =
+                'Ошибка импорта: ' .
+                $e->getMessage();
         }
+
+    } elseif (!$errors && !$preview) {
+
+        $errors[] =
+            'В файле нет данных для импорта.';
     }
 }
 
@@ -319,11 +708,70 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 <!DOCTYPE html>
 <html lang="ru">
+
 <head>
+
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
 
     <title>Импорт — Optima Glass</title>
+
+    <style>
+
+        body {
+            font-family: Arial, sans-serif;
+            margin: 30px;
+        }
+
+        .message {
+            padding: 12px;
+            margin: 20px 0;
+            background: #e8f5e9;
+            border: 1px solid #81c784;
+        }
+
+        .errors {
+            padding: 12px 20px;
+            margin: 20px 0;
+            background: #ffebee;
+            border: 1px solid #e57373;
+        }
+
+        table {
+            border-collapse: collapse;
+            width: 100%;
+            margin-top: 20px;
+        }
+
+        th,
+        td {
+            border: 1px solid #ccc;
+            padding: 8px;
+            text-align: left;
+        }
+
+        th {
+            background: #f5f5f5;
+        }
+
+        .format {
+            background: #f7f7f7;
+            padding: 15px;
+            border: 1px solid #ddd;
+            overflow-x: auto;
+        }
+
+        button {
+            padding: 10px 20px;
+            cursor: pointer;
+        }
+
+    </style>
+
 </head>
 
 <body>
@@ -333,66 +781,126 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <h1>Массовый импорт стекла</h1>
 
 <p>
-    Загрузите CSV или TXT файл.
+    Загрузите файл с данными стекла.
 </p>
 
 <p>
-    Формат:
+    Поддерживаются:
+    <strong>CSV</strong>,
+    <strong>TXT</strong> и
+    <strong>XLSX</strong>.
 </p>
 
-<pre>order_number;glass_type;thickness;width;height;quantity;comment
+<h2>Формат файла</h2>
+
+<p>
+    Обязательные колонки:
+</p>
+
+<pre class="format">order_number;glass_type;thickness;width;height;quantity;comment
 292;4FL;8;875;875;10;Стандартная партия
 292;4FL;8;1000;700;5;Срочный заказ
 292;8SN70;10;1200;800;3;Solar Control</pre>
 
+<p>
+    Для XLSX первая строка должна содержать те же названия колонок.
+</p>
+
+<ul>
+    <li><strong>order_number</strong> — номер заказа</li>
+    <li><strong>glass_type</strong> — код или название типа стекла</li>
+    <li><strong>thickness</strong> — толщина</li>
+    <li><strong>width</strong> — ширина в мм</li>
+    <li><strong>height</strong> — высота в мм</li>
+    <li><strong>quantity</strong> — количество</li>
+    <li><strong>comment</strong> — комментарий, необязательно</li>
+</ul>
+
 <?php if ($message): ?>
 
-    <p>
-        <strong><?= e($message) ?></strong>
-    </p>
+    <div class="message">
+        <strong>
+            <?= e($message) ?>
+        </strong>
+    </div>
 
 <?php endif; ?>
 
 <?php if ($errors): ?>
 
-    <h2>Ошибки</h2>
+    <div class="errors">
 
-    <ul>
-        <?php foreach ($errors as $error): ?>
-            <li><?= e($error) ?></li>
-        <?php endforeach; ?>
-    </ul>
+        <h2>Ошибки</h2>
+
+        <ul>
+
+            <?php foreach ($errors as $error): ?>
+
+                <li>
+                    <?= e($error) ?>
+                </li>
+
+            <?php endforeach; ?>
+
+        </ul>
+
+    </div>
 
 <?php endif; ?>
 
-<form method="post" enctype="multipart/form-data">
+<form
+    method="post"
+    enctype="multipart/form-data"
+>
 
     <p>
+
         <label>
-            Файл CSV/TXT:
+
+            <strong>
+                Файл CSV / TXT / XLSX:
+            </strong>
+
+            <br>
+
             <input
                 type="file"
                 name="import_file"
-                accept=".csv,.txt"
+                accept=".csv,.txt,.xlsx"
                 required
             >
+
         </label>
+
     </p>
 
-    <button type="submit">
-        Импортировать
-    </button>
+    <p>
+
+        <button type="submit">
+            Импортировать
+        </button>
+
+    </p>
 
 </form>
 
 <?php if ($preview): ?>
 
-    <h2>Предпросмотр</h2>
+    <h2>
+        Предпросмотр
+    </h2>
 
-    <table border="1" cellpadding="8" cellspacing="0">
+    <p>
+        Найдено строк:
+        <strong><?= count($preview) ?></strong>
+    </p>
+
+    <table>
 
         <thead>
+
         <tr>
+
             <th>Строка</th>
             <th>Заказ</th>
             <th>Тип</th>
@@ -401,7 +909,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <th>Высота</th>
             <th>Количество</th>
             <th>Комментарий</th>
+
         </tr>
+
         </thead>
 
         <tbody>
@@ -410,21 +920,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             <tr>
 
-                <td><?= (int)$item['line'] ?></td>
+                <td>
+                    <?= (int)$item['line'] ?>
+                </td>
 
-                <td><?= e($item['order_number']) ?></td>
+                <td>
+                    <?= e($item['order_number']) ?>
+                </td>
 
-                <td><?= e($item['glass_type']) ?></td>
+                <td>
+                    <?= e($item['glass_type']) ?>
+                </td>
 
-                <td><?= e((string)$item['thickness']) ?></td>
+                <td>
+                    <?= e((string)$item['thickness']) ?>
+                </td>
 
-                <td><?= (int)$item['width'] ?></td>
+                <td>
+                    <?= (int)$item['width'] ?>
+                </td>
 
-                <td><?= (int)$item['height'] ?></td>
+                <td>
+                    <?= (int)$item['height'] ?>
+                </td>
 
-                <td><?= (int)$item['quantity'] ?></td>
+                <td>
+                    <?= (int)$item['quantity'] ?>
+                </td>
 
-                <td><?= e($item['comment']) ?></td>
+                <td>
+                    <?= e($item['comment']) ?>
+                </td>
 
             </tr>
 
@@ -437,4 +963,5 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <?php endif; ?>
 
 </body>
+
 </html>

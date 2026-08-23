@@ -1,0 +1,497 @@
+* {
+  box-sizing: border-box;
+  }
+
+html,
+body {
+margin: 0;
+padding: 0;
+min-height: 100%;
+}
+
+body {
+font-family:
+Inter,
+-apple-system,
+BlinkMacSystemFont,
+"Segoe UI",
+Roboto,
+Arial,
+sans-serif;
+
+```
+color: #172033;
+```
+
+}
+
+/* =========================================
+LOGIN
+========================================= */
+
+.login-page {
+min-height: 100vh;
+overflow: hidden;
+}
+
+.login-background {
+position: relative;
+
+```
+min-height: 100vh;
+
+display: flex;
+align-items: center;
+justify-content: center;
+
+padding: 32px;
+
+background:
+    radial-gradient(
+        circle at 15% 20%,
+        rgba(69, 154, 255, 0.18),
+        transparent 32%
+    ),
+    radial-gradient(
+        circle at 85% 80%,
+        rgba(56, 189, 248, 0.14),
+        transparent 35%
+    ),
+    linear-gradient(
+        135deg,
+        #07111f 0%,
+        #0b1728 45%,
+        #101c30 100%
+    );
+```
+
+}
+
+/* декоративные световые пятна */
+
+.login-glow {
+position: absolute;
+
+```
+border-radius: 50%;
+
+filter: blur(70px);
+
+pointer-events: none;
+```
+
+}
+
+.login-glow-1 {
+width: 260px;
+height: 260px;
+
+```
+top: -80px;
+left: -60px;
+
+background: rgba(52, 152, 219, 0.16);
+```
+
+}
+
+.login-glow-2 {
+width: 320px;
+height: 320px;
+
+```
+right: -100px;
+bottom: -120px;
+
+background: rgba(14, 165, 233, 0.12);
+```
+
+}
+
+/* карточка */
+
+.login-container {
+position: relative;
+
+```
+width: 100%;
+max-width: 460px;
+
+z-index: 2;
+```
+
+}
+
+.login-card {
+position: relative;
+
+```
+padding: 42px;
+
+border: 1px solid rgba(255, 255, 255, 0.10);
+
+border-radius: 24px;
+
+background:
+    linear-gradient(
+        145deg,
+        rgba(255, 255, 255, 0.095),
+        rgba(255, 255, 255, 0.045)
+    );
+
+box-shadow:
+    0 30px 80px rgba(0, 0, 0, 0.38),
+    inset 0 1px 0 rgba(255, 255, 255, 0.08);
+
+backdrop-filter: blur(18px);
+```
+
+}
+
+/* бренд */
+
+.login-brand {
+display: flex;
+align-items: center;
+gap: 14px;
+
+```
+margin-bottom: 42px;
+```
+
+}
+
+.login-logo {
+width: 52px;
+height: 52px;
+
+```
+display: flex;
+align-items: center;
+justify-content: center;
+
+border-radius: 15px;
+
+color: #ffffff;
+
+font-size: 17px;
+font-weight: 800;
+letter-spacing: 1px;
+
+background:
+    linear-gradient(
+        135deg,
+        #38bdf8,
+        #2563eb
+    );
+
+box-shadow:
+    0 10px 30px rgba(37, 99, 235, 0.35);
+```
+
+}
+
+.login-brand-name {
+color: #ffffff;
+
+```
+font-size: 17px;
+font-weight: 800;
+
+letter-spacing: 1.5px;
+```
+
+}
+
+.login-brand-subtitle {
+margin-top: 4px;
+
+```
+color: rgba(255, 255, 255, 0.50);
+
+font-size: 12px;
+```
+
+}
+
+/* заголовок */
+
+.login-header {
+margin-bottom: 28px;
+}
+
+.login-header h1 {
+margin: 0;
+
+```
+color: #ffffff;
+
+font-size: 30px;
+line-height: 1.2;
+font-weight: 700;
+```
+
+}
+
+.login-header p {
+margin: 10px 0 0;
+
+```
+color: rgba(255, 255, 255, 0.55);
+
+font-size: 14px;
+line-height: 1.5;
+```
+
+}
+
+/* ошибка */
+
+.login-error {
+margin-bottom: 22px;
+padding: 13px 15px;
+
+```
+border: 1px solid rgba(248, 113, 113, 0.25);
+
+border-radius: 12px;
+
+color: #fecaca;
+
+background: rgba(127, 29, 29, 0.25);
+
+font-size: 13px;
+```
+
+}
+
+/* форма */
+
+.login-form {
+display: flex;
+flex-direction: column;
+gap: 20px;
+}
+
+.form-group {
+display: flex;
+flex-direction: column;
+gap: 8px;
+}
+
+.form-group label {
+color: rgba(255, 255, 255, 0.78);
+
+```
+font-size: 13px;
+font-weight: 600;
+```
+
+}
+
+.form-group input {
+width: 100%;
+
+```
+height: 52px;
+
+padding: 0 15px;
+
+border: 1px solid rgba(255, 255, 255, 0.12);
+
+border-radius: 13px;
+
+outline: none;
+
+color: #ffffff;
+
+background: rgba(255, 255, 255, 0.055);
+
+font-size: 15px;
+
+transition:
+    border-color 0.2s ease,
+    background 0.2s ease,
+    box-shadow 0.2s ease;
+```
+
+}
+
+.form-group input::placeholder {
+color: rgba(255, 255, 255, 0.30);
+}
+
+.form-group input:focus {
+border-color: rgba(56, 189, 248, 0.75);
+
+```
+background: rgba(255, 255, 255, 0.08);
+
+box-shadow:
+    0 0 0 4px rgba(56, 189, 248, 0.10);
+```
+
+}
+
+/* пароль */
+
+.password-field {
+position: relative;
+}
+
+.password-field input {
+padding-right: 52px;
+}
+
+.password-toggle {
+position: absolute;
+
+```
+top: 50%;
+right: 12px;
+
+width: 36px;
+height: 36px;
+
+transform: translateY(-50%);
+
+border: 0;
+border-radius: 9px;
+
+color: rgba(255, 255, 255, 0.45);
+
+background: transparent;
+
+cursor: pointer;
+
+font-size: 14px;
+```
+
+}
+
+.password-toggle:hover {
+color: #ffffff;
+background: rgba(255, 255, 255, 0.08);
+}
+
+/* кнопка */
+
+.login-button {
+width: 100%;
+height: 54px;
+
+```
+display: flex;
+align-items: center;
+justify-content: center;
+gap: 12px;
+
+margin-top: 6px;
+
+border: 0;
+border-radius: 13px;
+
+color: #ffffff;
+
+background:
+    linear-gradient(
+        135deg,
+        #0ea5e9,
+        #2563eb
+    );
+
+box-shadow:
+    0 12px 30px rgba(37, 99, 235, 0.28);
+
+font-size: 15px;
+font-weight: 700;
+
+cursor: pointer;
+
+transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease,
+    filter 0.2s ease;
+```
+
+}
+
+.login-button:hover {
+transform: translateY(-2px);
+
+```
+filter: brightness(1.08);
+
+box-shadow:
+    0 16px 35px rgba(37, 99, 235, 0.36);
+```
+
+}
+
+.login-button:active {
+transform: translateY(0);
+}
+
+.login-button-arrow {
+font-size: 20px;
+line-height: 1;
+}
+
+/* footer */
+
+.login-footer {
+display: flex;
+align-items: center;
+justify-content: center;
+gap: 8px;
+
+```
+margin-top: 32px;
+
+color: rgba(255, 255, 255, 0.32);
+
+font-size: 11px;
+```
+
+}
+
+.login-footer-dot {
+color: rgba(255, 255, 255, 0.18);
+}
+
+/* =========================================
+MOBILE
+========================================= */
+
+@media (max-width: 560px) {
+
+```
+.login-background {
+    padding: 18px;
+}
+
+.login-card {
+    padding: 28px 22px;
+
+    border-radius: 20px;
+}
+
+.login-brand {
+    margin-bottom: 32px;
+}
+
+.login-header h1 {
+    font-size: 26px;
+}
+
+.login-footer {
+    flex-direction: column;
+    gap: 4px;
+}
+
+.login-footer-dot {
+    display: none;
+}
+```
+
+}

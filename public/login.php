@@ -1,9 +1,9 @@
-<?php
+
 
 session_start();
 
 if (isset($_SESSION['user_id'])) {
-    header('Location: /');
+    header('Location: /index.php');
     exit;
 }
 
@@ -12,66 +12,219 @@ require __DIR__ . '/../src/db.php';
 $error = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $email = trim($_POST['email'] ?? '');
+
+    $login = trim($_POST['login'] ?? '');
     $password = $_POST['password'] ?? '';
 
-    $stmt = $db->prepare('SELECT id, name, password, role, active FROM users WHERE email = :email LIMIT 1');
-    $stmt->execute([':email' => $email]);
+    if ($login === '' || $password === '') {
+        $error = 'Введите логин и пароль.';
+    } else {
 
-    $user = $stmt->fetch();
+        $stmt = $db->prepare("
+            SELECT id, login, password, name, role
+            FROM users
+            WHERE login = :login
+            LIMIT 1
+        ");
 
-    if ($user && (int)$user['active'] === 1 && password_verify($password, $user['password'])) {
-        session_regenerate_id(true);
+        $stmt->execute([
+            ':login' => $login
+        ]);
 
-        $_SESSION['user_id'] = $user['id'];
-        $_SESSION['user_name'] = $user['name'];
-        $_SESSION['user_role'] = $user['role'];
+        $user = $stmt->fetch();
 
-        header('Location: /');
-        exit;
+        if ($user && password_verify($password, $user['password'])) {
+
+            $_SESSION['user_id'] = $user['id'];
+            $_SESSION['user_login'] = $user['login'];
+            $_SESSION['user_name'] = $user['name'];
+            $_SESSION['user_role'] = $user['role'];
+
+            header('Location: /index.php');
+            exit;
+
+        } else {
+            $error = 'Неверный логин или пароль.';
+        }
     }
-
-    $error = 'Неверный email или пароль.';
 }
+
+function e(?string $value): string
+{
+    return htmlspecialchars($value ?? '', ENT_QUOTES, 'UTF-8');
+}
+
 ?>
+
 <!DOCTYPE html>
+
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Вход — Optima Glass</title>
+
+```
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
+
+<title>Вход — Optima Glass</title>
+
+<link
+    rel="stylesheet"
+    href="/assets/css/app.css"
+>
+```
+
 </head>
-<body>
-    <h1>Optima Glass</h1>
-    <h2>Вход</h2>
 
-    <?php if ($error): ?>
-        <p style="color: red;">
-            <?= htmlspecialchars($error, ENT_QUOTES, 'UTF-8') ?>
-        </p>
-    <?php endif; ?>
+<body class="login-page">
 
-    <form method="post">
-        <div>
-            <label>
-                Email
+<div class="login-background">
+
+```
+<div class="login-glow login-glow-1"></div>
+<div class="login-glow login-glow-2"></div>
+
+<main class="login-container">
+
+    <section class="login-card">
+
+        <div class="login-brand">
+
+            <div class="login-logo">
+                OG
+            </div>
+
+            <div>
+                <div class="login-brand-name">
+                    OPTIMA GLASS
+                </div>
+
+                <div class="login-brand-subtitle">
+                    Производственная система
+                </div>
+            </div>
+
+        </div>
+
+        <div class="login-header">
+
+            <h1>Добро пожаловать</h1>
+
+            <p>
+                Войдите в систему для продолжения работы
+            </p>
+
+        </div>
+
+        <?php if ($error): ?>
+
+            <div class="login-error">
+                <?= e($error) ?>
+            </div>
+
+        <?php endif; ?>
+
+        <form method="post" class="login-form">
+
+            <div class="form-group">
+
+                <label for="login">
+                    Логин
+                </label>
+
                 <input
-                    type="email"
-                    name="email"
-                    value="<?= htmlspecialchars($_POST['email'] ?? '', ENT_QUOTES, 'UTF-8') ?>"
+                    type="text"
+                    id="login"
+                    name="login"
+                    value="<?= e($_POST['login'] ?? '') ?>"
+                    autocomplete="username"
+                    placeholder="Введите логин"
+                    autofocus
                     required
                 >
-            </label>
+
+            </div>
+
+            <div class="form-group">
+
+                <label for="password">
+                    Пароль
+                </label>
+
+                <div class="password-field">
+
+                    <input
+                        type="password"
+                        id="password"
+                        name="password"
+                        autocomplete="current-password"
+                        placeholder="Введите пароль"
+                        required
+                    >
+
+                    <button
+                        type="button"
+                        class="password-toggle"
+                        onclick="togglePassword()"
+                        aria-label="Показать пароль"
+                    >
+                        ◉
+                    </button>
+
+                </div>
+
+            </div>
+
+            <button
+                type="submit"
+                class="login-button"
+            >
+                <span>Войти в систему</span>
+                <span class="login-button-arrow">→</span>
+            </button>
+
+        </form>
+
+        <div class="login-footer">
+
+            <span>
+                Optima Glass
+            </span>
+
+            <span class="login-footer-dot">
+                •
+            </span>
+
+            <span>
+                Production Management
+            </span>
+
         </div>
 
-        <div>
-            <label>
-                Пароль
-                <input type="password" name="password" required>
-            </label>
-        </div>
+    </section>
 
-        <button type="submit">Войти</button>
-    </form>
+</main>
+```
+
+</div>
+
+<script>
+function togglePassword() {
+
+    const password = document.getElementById('password');
+    const button = document.querySelector('.password-toggle');
+
+    if (password.type === 'password') {
+        password.type = 'text';
+        button.textContent = '◉';
+    } else {
+        password.type = 'password';
+        button.textContent = '◉';
+    }
+}
+</script>
+
 </body>
 </html>

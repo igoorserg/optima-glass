@@ -1,4 +1,4 @@
-```php
+
 <?php
 
 session_start();
@@ -246,4 +246,4 @@ document.addEventListener('DOMContentLoaded', function () {
 
 </body>
 </html>
-```
+

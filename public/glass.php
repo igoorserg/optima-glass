@@ -1,3 +1,4 @@
+```php
 <?php
 
 session_start();
@@ -27,16 +28,6 @@ function statusLabel(string $status): string
         default => $status,
     };
 }
-
-$statuses = [
-    'created' => 'Создано',
-    'production' => 'В производстве',
-    'ready' => 'Готово',
-    'warehouse' => 'На складе',
-    'delivery' => 'Доставляется',
-    'installed' => 'Установлено',
-    'cancelled' => 'Отменено',
-];
 
 $code = trim($_GET['code'] ?? '');
 
@@ -74,105 +65,7 @@ if (!$glass) {
 
 /*
 |--------------------------------------------------------------------------
-| Изменение статуса
-|--------------------------------------------------------------------------
-*/
-
-$statusError = '';
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-
-    $newStatus = trim($_POST['status'] ?? '');
-
-    if (!isset($statuses[$newStatus])) {
-
-        $statusError = 'Выбран недопустимый статус.';
-
-    } elseif ($newStatus === $glass['status']) {
-
-        $statusError = 'Статус уже установлен.';
-
-    } else {
-
-        try {
-
-            $db->beginTransaction();
-
-            $oldStatus = $glass['status'];
-            $oldLocation = $glass['current_location'] ?? null;
-
-            /*
-             * Обновляем статус стекла.
-             */
-            $updateStmt = $db->prepare("
-                UPDATE glasses
-                SET status = :status
-                WHERE id = :id
-            ");
-
-            $updateStmt->execute([
-                ':status' => $newStatus,
-                ':id' => $glass['id']
-            ]);
-
-            /*
-             * Записываем изменение в историю.
-             */
-            $historyInsert = $db->prepare("
-                INSERT INTO glass_history (
-                    glass_id,
-                    old_status,
-                    new_status,
-                    old_location,
-                    new_location,
-                    employee_id
-                )
-                VALUES (
-                    :glass_id,
-                    :old_status,
-                    :new_status,
-                    :old_location,
-                    :new_location,
-                    :employee_id
-                )
-            ");
-
-            $historyInsert->execute([
-                ':glass_id' => $glass['id'],
-                ':old_status' => $oldStatus,
-                ':new_status' => $newStatus,
-                ':old_location' => $oldLocation,
-                ':new_location' => $oldLocation,
-                ':employee_id' => $_SESSION['user_id']
-            ]);
-
-            $db->commit();
-
-            /*
-             * PRG — после POST перезагружаем страницу.
-             */
-            header(
-                'Location: /glass.php?code=' .
-                urlencode($code) .
-                '&updated=1'
-            );
-
-            exit;
-
-        } catch (Throwable $e) {
-
-            if ($db->inTransaction()) {
-                $db->rollBack();
-            }
-
-            $statusError = 'Не удалось изменить статус.';
-        }
-    }
-}
-
-/*
-|--------------------------------------------------------------------------
-| Получаем историю
+| История
 |--------------------------------------------------------------------------
 */
 
@@ -183,6 +76,7 @@ $historyStmt = $db->prepare("
         h.new_status,
         h.old_location,
         h.new_location,
+        h.comment,
         u.name AS employee_name
     FROM glass_history h
     LEFT JOIN users u ON u.id = h.employee_id
@@ -195,6 +89,21 @@ $historyStmt->execute([
 ]);
 
 $history = $historyStmt->fetchAll();
+
+/*
+|--------------------------------------------------------------------------
+| Участки производства
+|--------------------------------------------------------------------------
+*/
+
+$locations = [
+    'Порезка',
+    'Обработка',
+    'Закалка',
+    'Емалит',
+    'Триплекс',
+    'Сборка',
+];
 
 ?>
 <!DOCTYPE html>
@@ -218,7 +127,9 @@ $history = $historyStmt->fetchAll();
         href="/assets/css/app.css"
     >
 
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+    <script
+        src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"
+    ></script>
 
 </head>
 
@@ -244,7 +155,7 @@ $history = $historyStmt->fetchAll();
             <?= e($glass['code']) ?>
         </p>
 
-        <?php if (isset($glass['order_number'])): ?>
+        <?php if (!empty($glass['order_number'])): ?>
 
             <p>
                 <strong>Заказ:</strong>
@@ -253,10 +164,10 @@ $history = $historyStmt->fetchAll();
 
         <?php endif; ?>
 
-        <?php if (isset($glass['glass_type'])): ?>
+        <?php if (!empty($glass['glass_type'])): ?>
 
             <p>
-                <strong>Тип стекла:</strong>
+                <strong>Тип:</strong>
                 <?= e($glass['glass_type']) ?>
             </p>
 
@@ -283,109 +194,14 @@ $history = $historyStmt->fetchAll();
 
         <?php endif; ?>
 
-        <p>
-            <strong>Текущий статус:</strong>
-            <?= e(statusLabel((string) $glass['status'])) ?>
-        </p>
+        <?php if (isset($glass['status'])): ?>
 
-
-        <?php if ($statusError): ?>
-
-            <div
-                style="
-                    margin: 15px 0;
-                    padding: 12px;
-                    border: 1px solid #ff3d81;
-                    border-radius: 8px;
-                    color: #ff3d81;
-                "
-            >
-                <?= e($statusError) ?>
-            </div>
-
-        <?php endif; ?>
-
-
-        <?php if (isset($_GET['updated'])): ?>
-
-            <div
-                style="
-                    margin: 15px 0;
-                    padding: 12px;
-                    border: 1px solid #00ff88;
-                    border-radius: 8px;
-                    color: #00ff88;
-                "
-            >
-                Статус успешно изменён.
-            </div>
-
-        <?php endif; ?>
-
-
-        <form
-            method="post"
-            action="/glass.php?code=<?= urlencode($glass['code']) ?>"
-            style="margin-top: 25px;"
-        >
-
-            <label for="status">
-                <strong>Изменить статус:</strong>
-            </label>
-
-            <div style="margin-top: 10px;">
-
-                <select
-                    id="status"
-                    name="status"
-                    required
-                    style="
-                        padding: 10px;
-                        min-width: 220px;
-                    "
-                >
-
-                    <?php foreach ($statuses as $value => $label): ?>
-
-                        <option
-                            value="<?= e($value) ?>"
-                            <?= $glass['status'] === $value ? 'selected' : '' ?>
-                        >
-                            <?= e($label) ?>
-                        </option>
-
-                    <?php endforeach; ?>
-
-                </select>
-
-                <button
-                    type="submit"
-                    style="
-                        margin-left: 8px;
-                        padding: 10px 18px;
-                        cursor: pointer;
-                    "
-                >
-                    Изменить статус
-                </button>
-
-            </div>
-
-        </form>
-
-
-        <?php if (isset($glass['employee_name']) && $glass['employee_name']): ?>
-
-            <p style="margin-top: 20px;">
-
-                <strong>Ответственный:</strong>
-
-                <?= e($glass['employee_name']) ?>
-
+            <p>
+                <strong>Статус:</strong>
+                <?= e(statusLabel((string) $glass['status'])) ?>
             </p>
 
         <?php endif; ?>
-
 
         <?php if (
             isset($glass['current_location']) &&
@@ -393,14 +209,48 @@ $history = $historyStmt->fetchAll();
         ): ?>
 
             <p>
-
-                <strong>Местоположение:</strong>
-
+                <strong>Участок:</strong>
                 <?= e($glass['current_location']) ?>
-
             </p>
 
         <?php endif; ?>
+
+        <?php if (
+            isset($glass['employee_name']) &&
+            $glass['employee_name']
+        ): ?>
+
+            <p>
+                <strong>Ответственный:</strong>
+                <?= e($glass['employee_name']) ?>
+            </p>
+
+        <?php else: ?>
+
+            <p>
+                <strong>Ответственный:</strong>
+                Не назначен
+            </p>
+
+        <?php endif; ?>
+
+        <?php if (
+            isset($glass['comment']) &&
+            $glass['comment'] !== ''
+        ): ?>
+
+            <p>
+                <strong>Комментарий:</strong>
+                <?= e($glass['comment']) ?>
+            </p>
+
+        <?php endif; ?>
+
+        <p>
+            <a href="/update_glass.php?code=<?= urlencode($glass['code']) ?>">
+                Изменить статус и участок
+            </a>
+        </p>
 
     </div>
 
@@ -409,54 +259,35 @@ $history = $historyStmt->fetchAll();
 
         <div class="card">
 
-            <h2>История изменений</h2>
+            <h2>История перемещений</h2>
 
             <?php foreach ($history as $item): ?>
 
                 <div class="history-item">
 
                     <p>
-
                         <strong>
                             <?= e($item['created_at']) ?>
                         </strong>
-
                     </p>
 
+                    <p>
 
-                    <?php if ($item['old_status'] !== null): ?>
+                        <?php if ($item['old_status'] !== null): ?>
 
-                        <p>
-
-                            <?= e(
-                                statusLabel(
-                                    (string) $item['old_status']
-                                )
-                            ) ?>
+                            <?= e(statusLabel((string) $item['old_status'])) ?>
 
                             →
 
-                            <?= e(
-                                statusLabel(
-                                    (string) $item['new_status']
-                                )
-                            ) ?>
+                            <?= e(statusLabel((string) $item['new_status'])) ?>
 
-                        </p>
+                        <?php else: ?>
 
-                    <?php else: ?>
+                            <?= e(statusLabel((string) $item['new_status'])) ?>
 
-                        <p>
+                        <?php endif; ?>
 
-                            <?= e(
-                                statusLabel(
-                                    (string) $item['new_status']
-                                )
-                            ) ?>
-
-                        </p>
-
-                    <?php endif; ?>
+                    </p>
 
 
                     <?php if (
@@ -466,33 +297,40 @@ $history = $historyStmt->fetchAll();
 
                         <p>
 
-                            Место:
+                            Участок:
 
-                            <?= e(
-                                $item['old_location'] ?? ''
-                            ) ?>
+                            <?= e($item['old_location'] ?? '—') ?>
 
                             →
 
-                            <?= e(
-                                $item['new_location'] ?? ''
-                            ) ?>
+                            <?= e($item['new_location'] ?? '—') ?>
 
                         </p>
 
                     <?php endif; ?>
 
 
-                    <?php if ($item['employee_name']): ?>
+                    <?php if (
+                        isset($item['employee_name']) &&
+                        $item['employee_name']
+                    ): ?>
 
                         <p>
-
                             Сотрудник:
+                            <?= e($item['employee_name']) ?>
+                        </p>
 
-                            <?= e(
-                                $item['employee_name']
-                            ) ?>
+                    <?php endif; ?>
 
+
+                    <?php if (
+                        isset($item['comment']) &&
+                        $item['comment'] !== ''
+                    ): ?>
+
+                        <p>
+                            Комментарий:
+                            <?= e($item['comment']) ?>
                         </p>
 
                     <?php endif; ?>
@@ -500,6 +338,16 @@ $history = $historyStmt->fetchAll();
                 </div>
 
             <?php endforeach; ?>
+
+        </div>
+
+    <?php else: ?>
+
+        <div class="card">
+
+            <h2>История</h2>
+
+            <p>История пока пуста.</p>
 
         </div>
 
@@ -512,8 +360,7 @@ $history = $historyStmt->fetchAll();
 
 document.addEventListener('DOMContentLoaded', function () {
 
-    const qrElement =
-        document.getElementById('qrcode');
+    const qrElement = document.getElementById('qrcode');
 
     if (
         qrElement &&
@@ -527,6 +374,7 @@ document.addEventListener('DOMContentLoaded', function () {
                 '/glass.php?code=<?= urlencode($glass['code']) ?>',
 
             width: 220,
+
             height: 220
 
         });
@@ -538,4 +386,5 @@ document.addEventListener('DOMContentLoaded', function () {
 </script>
 
 </body>
+
 </html>

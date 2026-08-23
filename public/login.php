@@ -1,4 +1,3 @@
-
 <?php
 
 session_start();
@@ -13,28 +12,29 @@ require __DIR__ . '/../src/db.php';
 $error = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $login = trim($_POST['login'] ?? '');
+    $email = trim($_POST['email'] ?? '');
     $password = $_POST['password'] ?? '';
 
-    if ($login === '' || $password === '') {
-        $error = 'Введите логин и пароль.';
+    if ($email === '' || $password === '') {
+        $error = 'Введите email и пароль.';
     } else {
         $stmt = $db->prepare("
-            SELECT id, login, password, name, role
+            SELECT id, name, email, password, role
             FROM users
-            WHERE login = :login
+            WHERE email = :email
+              AND active = 1
             LIMIT 1
         ");
 
         $stmt->execute([
-            ':login' => $login
+            ':email' => $email
         ]);
 
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if ($user && password_verify($password, $user['password'])) {
             $_SESSION['user_id'] = $user['id'];
-            $_SESSION['user_login'] = $user['login'];
+            $_SESSION['user_email'] = $user['email'];
             $_SESSION['user_name'] = $user['name'];
             $_SESSION['user_role'] = $user['role'];
 
@@ -42,7 +42,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             exit;
         }
 
-        $error = 'Неверный логин или пароль.';
+        $error = 'Неверный email или пароль.';
     }
 }
 
@@ -96,16 +96,16 @@ function e(?string $value): string
                 <div class="input-wrapper">
 
                     <input
-                        type="text"
-                        id="login"
-                        name="login"
-                        value="<?= e($_POST['login'] ?? '') ?>"
+                        type="email"
+                        id="email"
+                        name="email"
+                        value="<?= e($_POST['email'] ?? '') ?>"
                         required
-                        autocomplete="username"
+                        autocomplete="email"
                         autofocus
                     >
 
-                    <label for="login">Логин</label>
+                    <label for="email">Email</label>
 
                     <span class="input-line"></span>
 
@@ -246,4 +246,3 @@ document.addEventListener('DOMContentLoaded', function () {
 
 </body>
 </html>
-

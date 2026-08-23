@@ -9,27 +9,31 @@ if (!isset($_SESSION['user_id'])) {
 
 require __DIR__ . '/../src/db.php';
 
+function e(?string $value): string
+{
+    return htmlspecialchars($value ?? '', ENT_QUOTES, 'UTF-8');
+}
+
+function statusLabel(string $status): string
+{
+    return match ($status) {
+        'created' => 'Создано',
+        'production' => 'В производстве',
+        'ready' => 'Готово',
+        'warehouse' => 'На складе',
+        'delivery' => 'Доставляется',
+        'installed' => 'Установлено',
+        'cancelled' => 'Отменено',
+        default => $status,
+    };
+}
+
 $code = trim($_GET['code'] ?? '');
 
 if ($code === '') {
     http_response_code(400);
     exit('Код стекла не указан.');
 }
-
-<div id="qrcode"></div>
-
-<p>
-    <strong><?= e($glass['code']) ?></strong>
-</p>
-
-<script>
-new QRCode(document.getElementById('qrcode'), {
-    text: window.location.origin +
-        '/glass.php?code=<?= urlencode($glass['code']) ?>',
-    width: 220,
-    height: 220
-});
-</script>
 
 $stmt = $db->prepare("
     SELECT
@@ -41,7 +45,9 @@ $stmt = $db->prepare("
     LIMIT 1
 ");
 
-$stmt->execute([':code' => $code]);
+$stmt->execute([
+    ':code' => $code
+]);
 
 $glass = $stmt->fetch();
 
@@ -64,99 +70,169 @@ $historyStmt = $db->prepare("
     ORDER BY h.id DESC
 ");
 
-$historyStmt->execute([':glass_id' => $glass['id']]);
+$historyStmt->execute([
+    ':glass_id' => $glass['id']
+]);
+
 $history = $historyStmt->fetchAll();
 
-function statusLabel(string $status): string
-{
-    return match ($status) {
-        'created' => 'Создано',
-        'production' => 'В производстве',
-        'ready' => 'Готово',
-        'warehouse' => 'На складе',
-        'delivery' => 'Доставляется',
-        'installed' => 'Установлено',
-        'cancelled' => 'Отменено',
-        default => $status,
-    };
-}
-
-function e(?string $value): string
-{
-    return htmlspecialchars($value ?? '', ENT_QUOTES, 'UTF-8');
-}
 ?>
 <!DOCTYPE html>
 <html lang="ru">
+
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title><?= e($glass['code']) ?> — Optima Glass</title>
-      <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>
+        <?= e($glass['code']) ?> — Optima Glass
+    </title>
+
+    <link
+        rel="stylesheet"
+        href="/assets/css/app.css"
+    >
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js"></script>
 </head>
+
 <body>
 
-    <?php require __DIR__ . '/../src/partials/header.php'; ?>
+<?php require __DIR__ . '/../src/partials/header.php'; ?>
 
-    <h1>Optima Glass</h1>
+<main class="container">
 
-    <p>
-        <a href="/glasses.php">← Все стекла</a> |
-    </p>
+    <div class="card">
 
-    <h2><?= e($glass['code']) ?></h2>
+        <h1>
+            Стекло <?= e($glass['code']) ?>
+        </h1>
 
-    <p><strong>Заказ:</strong> <?= e($glass['order_number']) ?></p>
-    <p><strong>Тип:</strong> <?= e($glass['glass_type']) ?></p>
-    <p><strong>Размер:</strong> <?= (int) $glass['width'] ?> × <?= (int) $glass['height'] ?> мм</p>
-    <p><strong>Количество:</strong> <?= (int) $glass['quantity'] ?></p>
-    <p><strong>Статус:</strong> <?= e(statusLabel($glass['status'])) ?></p>
-    <p><strong>Место:</strong> <?= e($glass['current_location']) ?></p>
-    <p><strong>Ответственный:</strong> <?= e($glass['employee_name'] ?? 'Не назначен') ?></p>
-    <p><strong>Комментарий:</strong> <?= e($glass['comment']) ?></p>
-    <p><a href="/update_glass.php?code=<?= urlencode($glass['code']) ?>">Изменить статус</a></p>
+        <div
+            id="qrcode"
+            style="margin: 20px 0;"
+        ></div>
 
-    <h2>История перемещений</h2>
+        <p>
+            <strong>Код:</strong>
+            <?= e($glass['code']) ?>
+        </p>
 
-    <?php if (!$history): ?>
-        <p>История пока пуста.</p>
-    <?php else: ?>
-        <table border="1" cellpadding="8" cellspacing="0">
-            <thead>
-                <tr>
-                    <th>Дата</th>
-                    <th>Сотрудник</th>
-                    <th>Статус</th>
-                    <th>Место</th>
-                </tr>
-            </thead>
-            <tbody>
-                <?php foreach ($history as $item): ?>
-                    <tr>
-                        <td>
+        <?php if (isset($glass['status'])): ?>
+
+            <p>
+                <strong>Статус:</strong>
+                <?= e(statusLabel((string) $glass['status'])) ?>
+            </p>
+
+        <?php endif; ?>
+
+        <?php if (isset($glass['employee_name']) && $glass['employee_name']): ?>
+
+            <p>
+                <strong>Ответственный:</strong>
+                <?= e($glass['employee_name']) ?>
+            </p>
+
+        <?php endif; ?>
+
+        <?php if (isset($glass['location']) && $glass['location'] !== ''): ?>
+
+            <p>
+                <strong>Местоположение:</strong>
+                <?= e($glass['location']) ?>
+            </p>
+
+        <?php endif; ?>
+
+    </div>
+
+
+    <?php if ($history): ?>
+
+        <div class="card">
+
+            <h2>История</h2>
+
+            <?php foreach ($history as $item): ?>
+
+                <div class="history-item">
+
+                    <p>
+                        <strong>
                             <?= e($item['created_at']) ?>
-                        </td>
+                        </strong>
+                    </p>
 
-                        <td>
-                            <?= e($item['employee_name'] ?? 'Неизвестно') ?>
-                        </td>
+                    <?php if ($item['old_status'] !== null): ?>
 
-                        <td>
-                            <?= e(statusLabel($item['old_status'])) ?>
+                        <p>
+                            <?= e(statusLabel((string) $item['old_status'])) ?>
                             →
-                            <?= e(statusLabel($item['new_status'])) ?>
-                        </td>
+                            <?= e(statusLabel((string) $item['new_status'])) ?>
+                        </p>
 
-                        <td>
-                            <?= e($item['old_location'] ?? '—') ?>
+                    <?php else: ?>
+
+                        <p>
+                            <?= e(statusLabel((string) $item['new_status'])) ?>
+                        </p>
+
+                    <?php endif; ?>
+
+                    <?php if ($item['old_location'] !== null || $item['new_location'] !== null): ?>
+
+                        <p>
+                            Место:
+                            <?= e($item['old_location'] ?? '') ?>
                             →
-                            <?= e($item['new_location']) ?>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-            </tbody>
-        </table>
+                            <?= e($item['new_location'] ?? '') ?>
+                        </p>
+
+                    <?php endif; ?>
+
+                    <?php if ($item['employee_name']): ?>
+
+                        <p>
+                            Сотрудник:
+                            <?= e($item['employee_name']) ?>
+                        </p>
+
+                    <?php endif; ?>
+
+                </div>
+
+            <?php endforeach; ?>
+
+        </div>
+
     <?php endif; ?>
+
+</main>
+
+
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+
+    const qrElement = document.getElementById('qrcode');
+
+    if (qrElement && typeof QRCode !== 'undefined') {
+
+        new QRCode(qrElement, {
+            text: window.location.origin +
+                '/glass.php?code=<?= urlencode($glass['code']) ?>',
+            width: 220,
+            height: 220
+        });
+
+    }
+
+});
+</script>
 
 </body>
 </html>

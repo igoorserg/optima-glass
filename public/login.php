@@ -1,5 +1,5 @@
-
 <?php
+
 session_start();
 
 if (isset($_SESSION['user_id'])) {
@@ -12,14 +12,12 @@ require __DIR__ . '/../src/db.php';
 $error = '';
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-
     $login = trim($_POST['login'] ?? '');
     $password = $_POST['password'] ?? '';
 
     if ($login === '' || $password === '') {
         $error = 'Введите логин и пароль.';
     } else {
-
         $stmt = $db->prepare("
             SELECT id, login, password, name, role
             FROM users
@@ -34,7 +32,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $user = $stmt->fetch();
 
         if ($user && password_verify($password, $user['password'])) {
-
             $_SESSION['user_id'] = $user['id'];
             $_SESSION['user_login'] = $user['login'];
             $_SESSION['user_name'] = $user['name'];
@@ -42,10 +39,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             header('Location: /index.php');
             exit;
-
-        } else {
-            $error = 'Неверный логин или пароль.';
         }
+
+        $error = 'Неверный логин или пароль.';
     }
 }
 
@@ -55,176 +51,198 @@ function e(?string $value): string
 }
 
 ?>
-
 <!DOCTYPE html>
-
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
-```
-<meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
->
+    <title>OPTIMA GLASS — Вход</title>
 
-<title>Вход — Optima Glass</title>
+    <meta
+        name="description"
+        content="OPTIMA GLASS — производственная система"
+    >
 
-<link
-    rel="stylesheet"
-    href="/assets/css/app.css"
->
-
-
+    <link rel="stylesheet" href="/assets/css/login.css">
 </head>
 
-<body class="login-page">
+<body>
 
-<div class="login-background">
+<div class="background-effects">
+    <div class="glow-orb glow-orb-1"></div>
+    <div class="glow-orb glow-orb-2"></div>
+    <div class="glow-orb glow-orb-3"></div>
+</div>
 
+<div class="login-container">
 
-<div class="login-glow login-glow-1"></div>
-<div class="login-glow login-glow-2"></div>
-
-<main class="login-container">
-
-    <section class="login-card">
-
-        <div class="login-brand">
-
-            <div class="login-logo">
-                OG
-            </div>
-
-            <div>
-                <div class="login-brand-name">
-                    OPTIMA GLASS
-                </div>
-
-                <div class="login-brand-subtitle">
-                    Производственная система
-                </div>
-            </div>
-
-        </div>
+    <div class="login-card">
 
         <div class="login-header">
 
-            <h1>Добро пожаловать</h1>
+            <div class="logo-mark">
+                OG
+            </div>
 
-            <p>
-                Войдите в систему для продолжения работы
+            <h1>OPTIMA GLASS</h1>
+
+            <p class="system-name">
+                Производственная система
             </p>
+
+            <div class="welcome">
+                <h2>Добро пожаловать</h2>
+                <p>Войдите в систему для продолжения работы</p>
+            </div>
 
         </div>
 
         <?php if ($error): ?>
-
-            <div class="login-error">
-                <?= e($error) ?>
+            <div class="server-error">
+                <span class="error-icon">!</span>
+                <span><?= e($error) ?></span>
             </div>
-
         <?php endif; ?>
 
-        <form method="post" class="login-form">
+        <form
+            class="login-form"
+            method="POST"
+            action="/login.php"
+            autocomplete="on"
+        >
 
             <div class="form-group">
 
-                <label for="login">
-                    Логин
-                </label>
+                <div class="input-wrapper">
 
-                <input
-                    type="text"
-                    id="login"
-                    name="login"
-                    value="<?= e($_POST['login'] ?? '') ?>"
-                    autocomplete="username"
-                    placeholder="Введите логин"
-                    autofocus
-                    required
-                >
+                    <input
+                        type="text"
+                        id="login"
+                        name="login"
+                        value="<?= e($_POST['login'] ?? '') ?>"
+                        autocomplete="username"
+                        required
+                        autofocus
+                    >
+
+                    <label for="login">Логин</label>
+
+                    <span class="input-line"></span>
+
+                </div>
 
             </div>
 
             <div class="form-group">
 
-                <label for="password">
-                    Пароль
-                </label>
-
-                <div class="password-field">
+                <div class="input-wrapper password-wrapper">
 
                     <input
                         type="password"
                         id="password"
                         name="password"
                         autocomplete="current-password"
-                        placeholder="Введите пароль"
                         required
                     >
+
+                    <label for="password">Пароль</label>
 
                     <button
                         type="button"
                         class="password-toggle"
-                        onclick="togglePassword()"
+                        id="passwordToggle"
                         aria-label="Показать пароль"
                     >
-                        ◉
+                        <span class="toggle-icon"></span>
                     </button>
+
+                    <span class="input-line"></span>
 
                 </div>
 
             </div>
 
+            <div class="form-options">
+
+                <label class="remember-wrapper">
+                    <input
+                        type="checkbox"
+                        name="remember"
+                        id="remember"
+                    >
+
+                    <span class="custom-checkbox"></span>
+
+                    <span class="checkbox-text">
+                        Запомнить меня
+                    </span>
+                </label>
+
+            </div>
+
             <button
                 type="submit"
-                class="login-button"
+                class="login-btn"
+                id="loginButton"
             >
-                <span>Войти в систему</span>
-                <span class="login-button-arrow">→</span>
+                <span class="btn-text">
+                    Войти в систему
+                </span>
+
+                <span class="btn-loader"></span>
+
+                <span class="btn-glow"></span>
             </button>
 
         </form>
 
         <div class="login-footer">
-
-            <span>
-                Optima Glass
-            </span>
-
-            <span class="login-footer-dot">
-                •
-            </span>
-
-            <span>
-                Production Management
-            </span>
-
+            <span>OPTIMA GLASS</span>
+            <span class="footer-dot">•</span>
+            <span>Производственная система</span>
         </div>
 
-    </section>
-
-</main>
-```
+    </div>
 
 </div>
 
 <script>
-function togglePassword() {
+document.addEventListener('DOMContentLoaded', function () {
 
     const password = document.getElementById('password');
-    const button = document.querySelector('.password-toggle');
+    const toggle = document.getElementById('passwordToggle');
+    const icon = toggle?.querySelector('.toggle-icon');
+    const form = document.querySelector('.login-form');
+    const button = document.getElementById('loginButton');
 
-    if (password.type === 'password') {
-        password.type = 'text';
-        button.textContent = '◉';
-    } else {
-        password.type = 'password';
-        button.textContent = '◉';
+    if (toggle && password) {
+        toggle.addEventListener('click', function () {
+
+            const isPassword = password.type === 'password';
+
+            password.type = isPassword ? 'text' : 'password';
+
+            toggle.setAttribute(
+                'aria-label',
+                isPassword ? 'Скрыть пароль' : 'Показать пароль'
+            );
+
+            if (icon) {
+                icon.classList.toggle('show-password', isPassword);
+            }
+        });
     }
-}
+
+    if (form && button) {
+        form.addEventListener('submit', function () {
+            button.classList.add('loading');
+        });
+    }
+
+});
 </script>
 
 </body>
 </html>
+

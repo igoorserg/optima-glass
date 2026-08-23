@@ -52,6 +52,8 @@ function statusLabel(string $status): string
 </head>
 <body>
 
+    <?php require __DIR__ . '/../src/partials/header.php'; ?>
+
     <h1>Optima Glass</h1>
 
     <p>
@@ -76,6 +78,7 @@ function statusLabel(string $status): string
                     <th>Статус</th>
                     <th>Место</th>
                     <th>Ответственный</th>
+                    <th>Карточка</th>
                 </tr>
             </thead>
 
@@ -116,6 +119,12 @@ function statusLabel(string $status): string
 
                         <td>
                             <?= htmlspecialchars($glass['employee_name'] ?? 'Не назначен', ENT_QUOTES, 'UTF-8') ?>
+                        </td>
+
+                        <td>
+                            <a href="/glass.php?code=<?= urlencode($glass['code']) ?>">
+                                Открыть
+                            </a>
                         </td>
                     </tr>
                 <?php endforeach; ?>

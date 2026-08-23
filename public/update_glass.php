@@ -115,6 +115,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 </head>
 <body>
 
+    <?php require __DIR__ . '/../src/partials/header.php'; ?>
+
 <h1>Изменение стекла <?= htmlspecialchars($glass['code'], ENT_QUOTES, 'UTF-8') ?></h1>
 
 <p>

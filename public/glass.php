@@ -80,11 +80,12 @@ function e(?string $value): string
 </head>
 <body>
 
+    <?php require __DIR__ . '/../src/partials/header.php'; ?>
+
     <h1>Optima Glass</h1>
 
     <p>
         <a href="/glasses.php">← Все стекла</a> |
-        <a href="/logout.php">Выйти</a>
     </p>
 
     <h2><?= e($glass['code']) ?></h2>

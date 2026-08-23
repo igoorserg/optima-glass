@@ -1,0 +1,5 @@
+data/*.backup.sqlite
+data/*.before-import.sqlite
+data/optima-glass-backup-*.sqlite
+data/optima-glass-backup-*.sql
+*.save

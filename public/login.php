@@ -1,5 +1,5 @@
 
-
+<?php
 session_start();
 
 if (isset($_SESSION['user_id'])) {
@@ -74,7 +74,7 @@ function e(?string $value): string
     rel="stylesheet"
     href="/assets/css/app.css"
 >
-```
+
 
 </head>
 
@@ -82,7 +82,7 @@ function e(?string $value): string
 
 <div class="login-background">
 
-```
+
 <div class="login-glow login-glow-1"></div>
 <div class="login-glow login-glow-2"></div>
 

@@ -61,7 +61,7 @@ function e(?string $value): string
 
     <meta
         name="description"
-        content="OPTIMA GLASS — производственная система"
+        content="OPTIMA GLASS
     >
 
     <link rel="stylesheet" href="/assets/css/login.css">
@@ -88,12 +88,12 @@ function e(?string $value): string
             <h1>OPTIMA GLASS</h1>
 
             <p class="system-name">
-                Производственная система
+                
             </p>
 
             <div class="welcome">
-                <h2>Добро пожаловать</h2>
-                <p>Войдите в систему для продолжения работы</p>
+                <h2>Авторизація</h2>
+                <p>Пройдіть авторизацію</p>
             </div>
 
         </div>
@@ -126,7 +126,7 @@ function e(?string $value): string
                         autofocus
                     >
 
-                    <label for="login">Логин</label>
+                    <label for="login">Логін</label>
 
                     <span class="input-line"></span>
 
@@ -152,7 +152,7 @@ function e(?string $value): string
                         type="button"
                         class="password-toggle"
                         id="passwordToggle"
-                        aria-label="Показать пароль"
+                        aria-label="Відобразити пароль"
                     >
                         <span class="toggle-icon"></span>
                     </button>
@@ -175,7 +175,7 @@ function e(?string $value): string
                     <span class="custom-checkbox"></span>
 
                     <span class="checkbox-text">
-                        Запомнить меня
+                        Зберегти данні
                     </span>
                 </label>
 
@@ -187,7 +187,7 @@ function e(?string $value): string
                 id="loginButton"
             >
                 <span class="btn-text">
-                    Войти в систему
+                Війти в систему
                 </span>
 
                 <span class="btn-loader"></span>
@@ -200,7 +200,7 @@ function e(?string $value): string
         <div class="login-footer">
             <span>OPTIMA GLASS</span>
             <span class="footer-dot">•</span>
-            <span>Производственная система</span>
+            <span>Виробленно by vkmobile 2026</span>
         </div>
 
     </div>
@@ -245,4 +245,3 @@ document.addEventListener('DOMContentLoaded', function () {
 
 </body>
 </html>
-

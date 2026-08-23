@@ -15,12 +15,13 @@ $currentPage = basename($_SERVER['PHP_SELF']);
         <a href="/">Главная</a>
         <a href="/glasses.php">Стекла</a>
         <a href="/production.php">Производство</a>
+        <a href="/scan.php">Сканировать</a>
 
         <?php if (($_SESSION['user_role'] ?? '') === 'admin'): ?>
             <a href="/employees.php">Сотрудники</a>
             <a href="/admin/stages.php">Производственные этапы</a>
             <a href="/admin/glass_types.php">Типы стекла</a>
-        <a href="/admin/import.php">Импорт заказов</a>
+            <a href="/admin/import.php">Импорт заказов</a>
         <?php endif; ?>
 
         <a href="/logout.php">Выйти</a>

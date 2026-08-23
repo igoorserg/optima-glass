@@ -1,3 +1,4 @@
+```php
 <?php
 
 session_start();
@@ -29,7 +30,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             ':login' => $login
         ]);
 
-        $user = $stmt->fetch();
+        $user = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if ($user && password_verify($password, $user['password'])) {
             $_SESSION['user_id'] = $user['id'];
@@ -61,7 +62,7 @@ function e(?string $value): string
 
     <meta
         name="description"
-        content="OPTIMA GLASS
+        content="Вход в производственную систему OPTIMA GLASS"
     >
 
     <link rel="stylesheet" href="/assets/css/login.css">
@@ -69,50 +70,28 @@ function e(?string $value): string
 
 <body>
 
-<div class="background-effects">
-    <div class="glow-orb glow-orb-1"></div>
-    <div class="glow-orb glow-orb-2"></div>
-    <div class="glow-orb glow-orb-3"></div>
-</div>
-
 <div class="login-container">
 
     <div class="login-card">
 
         <div class="login-header">
 
-            <div class="logo-mark">
-              
-            </div>
+            <div class="logo-icon">⚡</div>
 
-            <h1>OPTIMA GLASS</h1>
+            <h2>OPTIMA GLASS</h2>
 
-            <p class="system-name">
-                
-            </p>
-
-            <div class="welcome">
-                <h2>Авторизація</h2>
-                <p>Пройдіть авторизацію</p>
-            </div>
+            <p>Производственная система</p>
 
         </div>
 
-        <?php if ($error): ?>
-            <div class="server-error">
-                <span class="error-icon">!</span>
-                <span><?= e($error) ?></span>
-            </div>
-        <?php endif; ?>
-
         <form
             class="login-form"
-            method="POST"
+            method="post"
             action="/login.php"
             autocomplete="on"
         >
 
-            <div class="form-group">
+            <div class="form-group <?= $error ? 'error' : '' ?>">
 
                 <div class="input-wrapper">
 
@@ -121,12 +100,12 @@ function e(?string $value): string
                         id="login"
                         name="login"
                         value="<?= e($_POST['login'] ?? '') ?>"
-                        autocomplete="username"
                         required
+                        autocomplete="username"
                         autofocus
                     >
 
-                    <label for="login">Логін</label>
+                    <label for="login">Логин</label>
 
                     <span class="input-line"></span>
 
@@ -134,7 +113,8 @@ function e(?string $value): string
 
             </div>
 
-            <div class="form-group">
+
+            <div class="form-group <?= $error ? 'error' : '' ?>">
 
                 <div class="input-wrapper password-wrapper">
 
@@ -142,8 +122,8 @@ function e(?string $value): string
                         type="password"
                         id="password"
                         name="password"
-                        autocomplete="current-password"
                         required
+                        autocomplete="current-password"
                     >
 
                     <label for="password">Пароль</label>
@@ -152,7 +132,7 @@ function e(?string $value): string
                         type="button"
                         class="password-toggle"
                         id="passwordToggle"
-                        aria-label="Відобразити пароль"
+                        aria-label="Показать пароль"
                     >
                         <span class="toggle-icon"></span>
                     </button>
@@ -163,81 +143,102 @@ function e(?string $value): string
 
             </div>
 
-            <div class="form-options">
 
-                <label class="remember-wrapper">
-                    <input
-                        type="checkbox"
-                        name="remember"
-                        id="remember"
-                    >
+            <?php if ($error): ?>
 
-                    <span class="custom-checkbox"></span>
+                <div
+                    class="error-message show"
+                    role="alert"
+                    style="opacity: 1; transform: translateY(0); margin-bottom: 20px;"
+                >
+                    <?= e($error) ?>
+                </div>
 
-                    <span class="checkbox-text">
-                        Зберегти данні
-                    </span>
-                </label>
+            <?php endif; ?>
 
-            </div>
 
             <button
                 type="submit"
                 class="login-btn"
-                id="loginButton"
             >
+
                 <span class="btn-text">
-                Війти в систему
+                    Войти
                 </span>
 
                 <span class="btn-loader"></span>
 
                 <span class="btn-glow"></span>
+
             </button>
 
         </form>
 
-        <div class="login-footer">
-            <span>OPTIMA GLASS</span>
-            <span class="footer-dot">•</span>
-            <span>Виробленно by vkmobile 2026</span>
-        </div>
+    </div>
+
+
+    <div class="background-effects">
+
+        <div class="glow-orb glow-orb-1"></div>
+
+        <div class="glow-orb glow-orb-2"></div>
+
+        <div class="glow-orb glow-orb-3"></div>
 
     </div>
 
 </div>
 
+
 <script>
 document.addEventListener('DOMContentLoaded', function () {
 
-    const password = document.getElementById('password');
-    const toggle = document.getElementById('passwordToggle');
-    const icon = toggle?.querySelector('.toggle-icon');
-    const form = document.querySelector('.login-form');
-    const button = document.getElementById('loginButton');
+    const passwordInput = document.getElementById('password');
+    const passwordToggle = document.getElementById('passwordToggle');
+    const toggleIcon = passwordToggle
+        ? passwordToggle.querySelector('.toggle-icon')
+        : null;
 
-    if (toggle && password) {
-        toggle.addEventListener('click', function () {
+    if (passwordToggle && passwordInput) {
 
-            const isPassword = password.type === 'password';
+        passwordToggle.addEventListener('click', function () {
 
-            password.type = isPassword ? 'text' : 'password';
+            const isPassword = passwordInput.type === 'password';
 
-            toggle.setAttribute(
+            passwordInput.type = isPassword ? 'text' : 'password';
+
+            passwordToggle.setAttribute(
                 'aria-label',
-                isPassword ? 'Скрыть пароль' : 'Показать пароль'
+                isPassword
+                    ? 'Скрыть пароль'
+                    : 'Показать пароль'
             );
 
-            if (icon) {
-                icon.classList.toggle('show-password', isPassword);
+            if (toggleIcon) {
+                toggleIcon.classList.toggle(
+                    'show-password',
+                    isPassword
+                );
             }
+
         });
+
     }
 
+
+    const form = document.querySelector('.login-form');
+    const button = document.querySelector('.login-btn');
+
     if (form && button) {
+
         form.addEventListener('submit', function () {
-            button.classList.add('loading');
+
+            if (form.checkValidity()) {
+                button.classList.add('loading');
+            }
+
         });
+
     }
 
 });
@@ -245,3 +246,4 @@ document.addEventListener('DOMContentLoaded', function () {
 
 </body>
 </html>
+```

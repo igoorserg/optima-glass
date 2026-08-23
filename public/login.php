@@ -82,7 +82,7 @@ function e(?string $value): string
         <div class="login-header">
 
             <div class="logo-mark">
-                OG
+              
             </div>
 
             <h1>OPTIMA GLASS</h1>

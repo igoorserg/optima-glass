@@ -4,3 +4,4 @@ data/optima-glass-backup-*.sqlite
 data/optima-glass-backup-*.sql
 *.save
 vendor/
+data/optima-glass.before-users-stage.sqlite

@@ -517,7 +517,7 @@ $employees = $stmt->fetchAll();
                 <?php endif; ?>
 
 
-                <?php if ((int) $employee['role'] !== 1): ?>
+                <?php if ($employee['role'] === 'employee'): ?>
 
                     <form
                         method="post"

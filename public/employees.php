@@ -21,10 +21,9 @@ function e(?string $value): string
 
 function roleLabel(string $role): string
 {
-    return match ($role) {
-        'admin' => 'Администратор',
-        default => 'Сотрудник',
-    };
+    return $role === 'admin'
+        ? 'Администратор'
+        : 'Сотрудник';
 }
 
 $error = '';
@@ -37,7 +36,7 @@ $success = '';
 */
 
 $stageStmt = $db->query("
-    SELECT id, name, active
+    SELECT id, name
     FROM production_stages
     WHERE active = 1
     ORDER BY id
@@ -47,7 +46,7 @@ $stages = $stageStmt->fetchAll(PDO::FETCH_ASSOC);
 
 /*
 |--------------------------------------------------------------------------
-| Обработка POST
+| Добавление пользователя
 |--------------------------------------------------------------------------
 */
 
@@ -55,23 +54,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     $action = $_POST['action'] ?? '';
 
-    /*
-     * Добавление пользователя
-     */
     if ($action === 'add') {
 
         $name = trim($_POST['name'] ?? '');
         $email = trim($_POST['email'] ?? '');
         $password = $_POST['password'] ?? '';
         $role = $_POST['role'] ?? 'employee';
-        $stageIdRaw = $_POST['stage_id'] ?? '';
 
-        $stageId = $stageIdRaw === ''
-            ? null
-            : (int) $stageIdRaw;
+        $stageId = $_POST['stage_id'] ?? '';
 
         if ($name === '') {
-            $error = 'Введите имя сотрудника.';
+            $error = 'Введите имя пользователя.';
         } elseif ($email === '') {
             $error = 'Введите email.';
         } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
@@ -82,13 +75,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $error = 'Пароль должен содержать минимум 6 символов.';
         } elseif (!in_array($role, ['employee', 'admin'], true)) {
             $error = 'Недопустимая роль.';
-        } elseif ($role === 'employee' && $stageId === null) {
-            $error = 'Для сотрудника необходимо выбрать участок.';
+        } elseif ($role === 'employee' && $stageId === '') {
+            $error = 'Выберите производственный участок.';
         } else {
+
+            $stageId = $stageId === ''
+                ? null
+                : (int) $stageId;
 
             if ($stageId !== null) {
 
-                $checkStage = $db->prepare("
+                $check = $db->prepare("
                     SELECT id
                     FROM production_stages
                     WHERE id = :id
@@ -96,12 +93,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     LIMIT 1
                 ");
 
-                $checkStage->execute([
+                $check->execute([
                     ':id' => $stageId,
                 ]);
 
-                if (!$checkStage->fetch()) {
-                    $error = 'Выбранный участок не существует или отключён.';
+                if (!$check->fetch()) {
+                    $error = 'Выбранный участок недоступен.';
                 }
             }
 
@@ -145,9 +142,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                 } catch (PDOException $exception) {
 
-                    $message = strtolower($exception->getMessage());
-
-                    if (str_contains($message, 'unique')) {
+                    if (str_contains(
+                        strtolower($exception->getMessage()),
+                        'unique'
+                    )) {
                         $error = 'Пользователь с таким email уже существует.';
                     } else {
                         $error = 'Не удалось добавить пользователя.';
@@ -158,28 +156,27 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     /*
-     * Изменение участка
-     */
+    |--------------------------------------------------------------------------
+    | Изменение участка
+    |--------------------------------------------------------------------------
+    */
+
     if ($action === 'stage') {
 
         $userId = (int) ($_POST['user_id'] ?? 0);
-        $stageIdRaw = $_POST['stage_id'] ?? '';
-
-        $stageId = $stageIdRaw === ''
-            ? null
-            : (int) $stageIdRaw;
+        $stageId = (int) ($_POST['stage_id'] ?? 0);
 
         if ($userId <= 0) {
 
             $error = 'Некорректный пользователь.';
 
-        } elseif ($stageId === null) {
+        } elseif ($stageId <= 0) {
 
             $error = 'Выберите участок.';
 
         } else {
 
-            $checkStage = $db->prepare("
+            $check = $db->prepare("
                 SELECT id
                 FROM production_stages
                 WHERE id = :id
@@ -187,13 +184,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 LIMIT 1
             ");
 
-            $checkStage->execute([
+            $check->execute([
                 ':id' => $stageId,
             ]);
 
-            if (!$checkStage->fetch()) {
+            if (!$check->fetch()) {
 
-                $error = 'Выбранный участок не существует или отключён.';
+                $error = 'Выбранный участок недоступен.';
 
             } else {
 
@@ -214,8 +211,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 
     /*
-     * Включение / отключение пользователя
-     */
+    |--------------------------------------------------------------------------
+    | Включение / отключение пользователя
+    |--------------------------------------------------------------------------
+    */
+
     if ($action === 'toggle') {
 
         $userId = (int) ($_POST['user_id'] ?? 0);
@@ -250,7 +250,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
 /*
 |--------------------------------------------------------------------------
-| Пользователи
+| Получаем пользователей
 |--------------------------------------------------------------------------
 */
 
@@ -293,6 +293,7 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
     >
 
     <style>
+
         .employees-page {
             max-width: 1200px;
             margin: 0 auto;
@@ -302,21 +303,21 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
         .employees-card {
             margin-bottom: 24px;
             padding: 24px;
-            border: 1px solid #ddd;
-            border-radius: 12px;
+            border-radius: 14px;
             background: #fff;
+            border: 1px solid #e5e7eb;
         }
 
         .employees-form {
             display: grid;
             grid-template-columns: repeat(2, minmax(0, 1fr));
-            gap: 16px;
+            gap: 18px;
         }
 
         .employees-field {
             display: flex;
             flex-direction: column;
-            gap: 6px;
+            gap: 7px;
         }
 
         .employees-field.full {
@@ -326,7 +327,8 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
         .employees-field input,
         .employees-field select {
             width: 100%;
-            padding: 10px 12px;
+            min-height: 42px;
+            padding: 9px 12px;
         }
 
         .employees-table-wrap {
@@ -341,9 +343,25 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
         .employees-table th,
         .employees-table td {
             padding: 12px;
-            border-bottom: 1px solid #ddd;
+            border-bottom: 1px solid #e5e7eb;
             text-align: left;
             vertical-align: top;
+        }
+
+        .employees-success {
+            padding: 12px 15px;
+            margin-bottom: 20px;
+            border-radius: 9px;
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .employees-error {
+            padding: 12px 15px;
+            margin-bottom: 20px;
+            border-radius: 9px;
+            background: #fee2e2;
+            color: #991b1b;
         }
 
         .employee-active {
@@ -356,34 +374,18 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
             font-weight: 600;
         }
 
-        .employees-message {
-            margin-bottom: 20px;
-            padding: 12px 15px;
-            border-radius: 8px;
-        }
-
-        .employees-error {
-            color: #991b1b;
-            background: #fee2e2;
-        }
-
-        .employees-success {
-            color: #166534;
-            background: #dcfce7;
-        }
-
         .stage-form {
             display: flex;
             gap: 8px;
-            min-width: 240px;
         }
 
         .stage-form select {
             flex: 1;
-            padding: 8px;
+            min-width: 150px;
         }
 
         @media (max-width: 700px) {
+
             .employees-form {
                 grid-template-columns: 1fr;
             }
@@ -395,7 +397,9 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
             .stage-form {
                 flex-direction: column;
             }
+
         }
+
     </style>
 
 </head>
@@ -416,30 +420,33 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
 
     </div>
 
-
     <?php if ($error !== ''): ?>
 
-        <div class="employees-message employees-error">
+        <div class="employees-error">
             <?= e($error) ?>
         </div>
 
     <?php endif; ?>
 
-
     <?php if ($success !== ''): ?>
 
-        <div class="employees-message employees-success">
+        <div class="employees-success">
             <?= e($success) ?>
         </div>
 
     <?php endif; ?>
 
 
+    <!-- Добавление пользователя -->
+
     <section class="employees-card">
 
         <h2>Добавить пользователя</h2>
 
-        <form method="post" class="employees-form">
+        <form
+            method="post"
+            class="employees-form"
+        >
 
             <input
                 type="hidden"
@@ -564,6 +571,8 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
     </section>
 
 
+    <!-- Список пользователей -->
+
     <section class="employees-card">
 
         <h2>Пользователи</h2>
@@ -625,46 +634,6 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
                                         Все участки
                                     </strong>
 
-                                <?php elseif ($user['stage_name']): ?>
-
-                                    <form
-                                        method="post"
-                                        class="stage-form"
-                                    >
-
-                                        <input
-                                            type="hidden"
-                                            name="action"
-                                            value="stage"
-                                        >
-
-                                        <input
-                                            type="hidden"
-                                            name="user_id"
-                                            value="<?= (int) $user['id'] ?>"
-                                        >
-
-                                        <select name="stage_id">
-
-                                            <?php foreach ($stages as $stage): ?>
-
-                                                <option
-                                                    value="<?= (int) $stage['id'] ?>"
-                                                    <?= (int) $user['stage_id'] === (int) $stage['id'] ? 'selected' : '' ?>
-                                                >
-                                                    <?= e($stage['name']) ?>
-                                                </option>
-
-                                            <?php endforeach; ?>
-
-                                        </select>
-
-                                        <button type="submit">
-                                            Сохранить
-                                        </button>
-
-                                    </form>
-
                                 <?php else: ?>
 
                                     <form
@@ -684,7 +653,10 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
                                             value="<?= (int) $user['id'] ?>"
                                         >
 
-                                        <select name="stage_id" required>
+                                        <select
+                                            name="stage_id"
+                                            required
+                                        >
 
                                             <option value="">
                                                 Выберите участок
@@ -694,6 +666,7 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
 
                                                 <option
                                                     value="<?= (int) $stage['id'] ?>"
+                                                    <?= (int) $user['stage_id'] === (int) $stage['id'] ? 'selected' : '' ?>
                                                 >
                                                     <?= e($stage['name']) ?>
                                                 </option>
@@ -703,7 +676,7 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
                                         </select>
 
                                         <button type="submit">
-                                            Назначить
+                                            Сохранить
                                         </button>
 
                                     </form>
@@ -801,4 +774,3 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
 
 </body>
 </html>
-

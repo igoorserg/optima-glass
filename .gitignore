@@ -6,3 +6,4 @@ data/optima-glass-backup-*.sql
 vendor/
 data/optima-glass.before-users-stage.sqlite
 data/optima-glass.sqlite
+.env

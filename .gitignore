@@ -7,3 +7,5 @@ vendor/
 data/optima-glass.before-users-stage.sqlite
 data/optima-glass.sqlite
 .env
+
+*.before-*

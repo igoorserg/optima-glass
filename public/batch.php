@@ -1,8 +1,17 @@
 <?php
 
 require __DIR__ . '/../src/auth.php';
+require __DIR__ . '/../src/notifications.php';
+require __DIR__ . '/../src/telegram.php';
+require __DIR__ . '/../src/permissions.php';
 
 $user = require_user();
+
+/*
+|--------------------------------------------------------------------------
+| Допоміжні функції
+|--------------------------------------------------------------------------
+*/
 
 function e(?string $value): string
 {
@@ -13,51 +22,233 @@ function e(?string $value): string
     );
 }
 
-function priorityLabel(int $priority): string
-{
-    return match ($priority) {
-        3 => '🔴 Критический',
-        2 => '🟠 Срочный',
-        default => '🟢 Обычный',
-    };
-}
+function writeBatchAudit(
+    PDO $db,
+    int $userId,
+    string $action,
+    ?string $entityType,
+    ?int $entityId,
+    ?array $oldValue = null,
+    ?array $newValue = null
+): void {
 
-function batchStatusLabel(string $status): string
-{
-    return match ($status) {
-        'created' => 'Создана',
-        'in_progress' => 'В работе',
-        'completed' => 'Завершена',
-        'cancelled' => 'Отменена',
-        default => $status,
-    };
-}
+    $stmt = $db->prepare("
+        INSERT INTO audit_log (
+            user_id,
+            action,
+            entity_type,
+            entity_id,
+            old_value,
+            new_value,
+            ip_address,
+            user_agent
+        )
+        VALUES (
+            :user_id,
+            :action,
+            :entity_type,
+            :entity_id,
+            :old_value,
+            :new_value,
+            :ip_address,
+            :user_agent
+        )
+    ");
 
-function itemStatusLabel(string $status): string
-{
-    return match ($status) {
-        'pending' => 'Ожидает',
-        'completed' => 'Готово',
-        'rejected' => 'Брак',
-        'cancelled' => 'Отменено',
-        default => $status,
-    };
+    $stmt->execute([
+        ':user_id' =>
+            $userId,
+
+        ':action' =>
+            $action,
+
+        ':entity_type' =>
+            $entityType,
+
+        ':entity_id' =>
+            $entityId,
+
+        ':old_value' =>
+            $oldValue !== null
+                ? json_encode(
+                    $oldValue,
+                    JSON_UNESCAPED_UNICODE
+                )
+                : null,
+
+        ':new_value' =>
+            $newValue !== null
+                ? json_encode(
+                    $newValue,
+                    JSON_UNESCAPED_UNICODE
+                )
+                : null,
+
+        ':ip_address' =>
+            $_SERVER['REMOTE_ADDR'] ?? null,
+
+        ':user_agent' =>
+            $_SERVER['HTTP_USER_AGENT'] ?? null,
+    ]);
 }
 
 /*
 |--------------------------------------------------------------------------
-| ID партии
+| Доступ до сторінки
 |--------------------------------------------------------------------------
 */
 
-$batchId = isset($_GET['id'])
-    ? (int) $_GET['id']
-    : (int) ($_POST['batch_id'] ?? 0);
+require_permission(
+    'production.view',
+    $user
+);
+
+/*
+|--------------------------------------------------------------------------
+| ID партії
+|--------------------------------------------------------------------------
+*/
+
+$batchId =
+    (int) (
+        $_GET['id']
+        ?? $_POST['batch_id']
+        ?? 0
+    );
 
 if ($batchId <= 0) {
+
     http_response_code(400);
-    exit('Партия не указана.');
+
+    exit(
+        'Партію не вказано.'
+    );
 }
+
+/*
+|--------------------------------------------------------------------------
+| Завантаження партії
+|--------------------------------------------------------------------------
+*/
+
+$batchStmt =
+    $db->prepare("
+        SELECT
+            pb.id,
+            pb.order_id,
+            pb.route_step_id,
+            pb.employee_id,
+            pb.created_by,
+            pb.assigned_employee_id,
+            pb.status,
+            pb.started_at,
+            pb.completed_at,
+            pb.created_at,
+
+            o.order_number,
+            o.customer_name,
+            o.priority,
+            o.planned_date,
+
+            rs.name AS stage_name,
+
+            u.name AS assigned_employee_name
+
+        FROM production_batches pb
+
+        JOIN orders o
+            ON o.id =
+                pb.order_id
+
+        JOIN route_steps rs
+            ON rs.id =
+                pb.route_step_id
+
+        LEFT JOIN users u
+            ON u.id =
+                pb.assigned_employee_id
+
+        WHERE pb.id =
+            :id
+
+        LIMIT 1
+    ");
+
+$batchStmt->execute([
+    ':id' =>
+        $batchId,
+]);
+
+$batch =
+    $batchStmt->fetch(
+        PDO::FETCH_ASSOC
+    );
+
+if (!$batch) {
+
+    http_response_code(404);
+
+    exit(
+        'Партію не знайдено.'
+    );
+}
+
+/*
+|--------------------------------------------------------------------------
+| Право працювати саме з цією партією
+|--------------------------------------------------------------------------
+|
+| Працівник — лише зі своєю партією.
+| production.manage — може працювати з іншими партіями.
+| Суперадмін — повний доступ.
+|
+|--------------------------------------------------------------------------
+*/
+
+$isAssignedEmployee =
+    (int) (
+        $batch[
+            'assigned_employee_id'
+        ] ?? 0
+    )
+    ===
+    (int) $user['id'];
+
+$canManageAnyBatch =
+    can(
+        'production.manage',
+        $user
+    )
+    ||
+    isSuperAdmin(
+        $user
+    );
+
+$canWorkWithBatch =
+    $isAssignedEmployee
+    ||
+    $canManageAnyBatch;
+
+if (!$canWorkWithBatch) {
+
+    http_response_code(403);
+
+    exit(
+        'Ви не маєте доступу до цієї партії.'
+    );
+}
+
+$canComplete =
+    can(
+        'production.complete_batch',
+        $user
+    );
+
+$canReject =
+    can(
+        'glass.reject',
+        $user
+    );
 
 /*
 |--------------------------------------------------------------------------
@@ -65,518 +256,945 @@ if ($batchId <= 0) {
 |--------------------------------------------------------------------------
 */
 
-if (empty($_SESSION['csrf_batch'])) {
-    $_SESSION['csrf_batch'] = bin2hex(
-        random_bytes(32)
-    );
-}
-
-$csrfToken = $_SESSION['csrf_batch'];
-
-$error = '';
-$success = '';
-
-/*
-|--------------------------------------------------------------------------
-| Загружаем партию
-|--------------------------------------------------------------------------
-*/
-
-$batchStmt = $db->prepare("
-    SELECT
-        pb.id,
-        pb.order_id,
-        pb.route_step_id,
-        pb.employee_id,
-        pb.created_by,
-        pb.assigned_employee_id,
-        pb.status,
-        pb.created_at,
-        pb.started_at,
-        pb.completed_at,
-
-        o.order_number,
-        o.customer_name,
-        o.priority,
-        o.planned_date,
-
-        rs.step_number,
-        rs.name AS stage_name,
-
-        ps.id AS stage_id,
-        ps.execution_mode,
-
-        creator.name AS creator_name,
-        assigned.name AS assigned_employee_name
-
-    FROM production_batches pb
-
-    JOIN orders o
-        ON o.id = pb.order_id
-
-    JOIN route_steps rs
-        ON rs.id = pb.route_step_id
-
-    JOIN production_stages ps
-        ON ps.name = rs.name
-
-    LEFT JOIN users creator
-        ON creator.id = pb.created_by
-
-    LEFT JOIN users assigned
-        ON assigned.id = pb.assigned_employee_id
-
-    WHERE pb.id = :id
-
-    LIMIT 1
-");
-
-$batchStmt->execute([
-    ':id' => $batchId,
-]);
-
-$batch = $batchStmt->fetch(
-    PDO::FETCH_ASSOC
-);
-
-if (!$batch) {
-    http_response_code(404);
-    exit('Партия не найдена.');
-}
-
-/*
-|--------------------------------------------------------------------------
-| Права
-|--------------------------------------------------------------------------
-*/
-
-$role = $user['role'];
-
-$canManageAll = in_array(
-    $role,
-    [
-        'superadmin',
-        'admin',
-        'manager',
-    ],
-    true
-);
-
-$isSectionManagerForBatch =
-    $role === 'section_manager'
-    && (int) ($user['stage_id'] ?? 0)
-    === (int) $batch['stage_id'];
-
-$isAssignedEmployee =
-    in_array(
-        $role,
-        [
-            'employee',
-            'section_manager',
-        ],
-        true
+if (
+    empty(
+        $_SESSION[
+            'csrf_batch'
+        ]
     )
-    &&
-    (int) (
-        $batch['assigned_employee_id'] ?? 0
-    ) === (int) $user['id'];
+) {
 
-$canManageBatch =
-    $canManageAll
-    || $isSectionManagerForBatch
-    || $isAssignedEmployee;
-
-if (!$canManageBatch) {
-    http_response_code(403);
-    exit('У вас нет доступа к этой партии.');
+    $_SESSION[
+        'csrf_batch'
+    ] =
+        bin2hex(
+            random_bytes(32)
+        );
 }
+
+$csrfToken =
+    $_SESSION[
+        'csrf_batch'
+    ];
+
+$messageType = '';
+$messageTitle = '';
+$messageText = '';
 
 /*
 |--------------------------------------------------------------------------
-| Загружаем элементы партии
+| Причини браку
 |--------------------------------------------------------------------------
 */
 
-function loadBatchItems(
-    PDO $db,
-    int $batchId
-): array {
-    $stmt = $db->prepare("
-        SELECT
-            pbi.id AS batch_item_id,
-            pbi.batch_id,
-            pbi.glass_id,
-            pbi.status AS item_status,
-            pbi.created_at AS item_created_at,
-            pbi.completed_at AS item_completed_at,
-
-            g.code,
-            g.order_number,
-            g.glass_type,
-            g.thickness,
-            g.width,
-            g.height,
-            g.quantity,
-            g.status AS glass_status,
-            g.current_step_id,
-
-            rs.id AS route_step_id,
-            rs.step_number,
-            rs.name AS stage_name
-
-        FROM production_batch_items pbi
-
-        JOIN glasses g
-            ON g.id = pbi.glass_id
-
-        LEFT JOIN route_steps rs
-            ON rs.id = g.current_step_id
-
-        WHERE pbi.batch_id = :batch_id
-
-        ORDER BY
-            g.id ASC
-    ");
-
-    $stmt->execute([
-        ':batch_id' => $batchId,
-    ]);
-
-    return $stmt->fetchAll(
-        PDO::FETCH_ASSOC
-    );
-}
-
-$items = loadBatchItems(
-    $db,
-    $batchId
-);
+$rejectionReasons = [
+    'Тріщина',
+    'Скол',
+    'Подряпина',
+    'Невідповідність розміру',
+    'Пошкодження поверхні',
+    'Бій скла',
+    'Інша причина',
+];
 
 /*
 |--------------------------------------------------------------------------
-| Завершение партии
+| POST
 |--------------------------------------------------------------------------
 */
 
 if (
-    $_SERVER['REQUEST_METHOD'] === 'POST'
-    &&
-    ($_POST['action'] ?? '') === 'complete_batch'
+    $_SERVER[
+        'REQUEST_METHOD'
+    ]
+    ===
+    'POST'
 ) {
 
-    if (!hash_equals(
-        $csrfToken,
-        $_POST['csrf_token'] ?? ''
-    )) {
-
-        $error = 'Ошибка проверки безопасности.';
-
-    } elseif (
-        $batch['status'] !== 'in_progress'
+    if (
+        !hash_equals(
+            $csrfToken,
+            $_POST[
+                'csrf_token'
+            ] ?? ''
+        )
     ) {
 
-        $error =
-            'Эта партия уже завершена или отменена.';
+        http_response_code(403);
 
-    } else {
+        exit(
+            'Помилка перевірки безпеки.'
+        );
+    }
 
-        $submittedResults =
-            $_POST['results'] ?? [];
+    $action =
+        $_POST[
+            'action'
+        ] ?? '';
 
-        if (!is_array($submittedResults)) {
-            $submittedResults = [];
+    /*
+    |--------------------------------------------------------------------------
+    | Брак конкретного скла
+    |--------------------------------------------------------------------------
+    */
+
+    if (
+        $action ===
+        'reject_item'
+    ) {
+
+        require_permission(
+            'glass.reject',
+            $user
+        );
+
+        if (
+            !$canWorkWithBatch
+        ) {
+
+            http_response_code(403);
+
+            exit(
+                'Немає доступу до партії.'
+            );
         }
 
-        try {
+        if (
+            !in_array(
+                $batch[
+                    'status'
+                ],
+                [
+                    'created',
+                    'in_progress',
+                ],
+                true
+            )
+        ) {
 
-            $db->beginTransaction();
+            $messageType =
+                'error';
 
-            /*
-             * Повторно загружаем актуальную партию.
-             */
+            $messageTitle =
+                'Брак не оформлено';
 
-            $lockStmt = $db->prepare("
-                SELECT
-                    pb.*,
-                    o.order_number,
-                    o.customer_name,
-                    o.priority
-                FROM production_batches pb
-                JOIN orders o
-                    ON o.id = pb.order_id
-                WHERE pb.id = :id
-                LIMIT 1
-            ");
+            $messageText =
+                'Партія вже завершена або скасована.';
 
-            $lockStmt->execute([
-                ':id' => $batchId,
-            ]);
+        } else {
 
-            $currentBatch =
-                $lockStmt->fetch(
-                    PDO::FETCH_ASSOC
+            $glassId =
+                (int) (
+                    $_POST[
+                        'glass_id'
+                    ] ?? 0
                 );
 
-            if (!$currentBatch) {
-                throw new RuntimeException(
-                    'Партия не найдена.'
+            $reason =
+                trim(
+                    $_POST[
+                        'reason'
+                    ] ?? ''
                 );
-            }
+
+            $comment =
+                trim(
+                    $_POST[
+                        'comment'
+                    ] ?? ''
+                );
 
             if (
-                $currentBatch['status']
-                !== 'in_progress'
+                !in_array(
+                    $reason,
+                    $rejectionReasons,
+                    true
+                )
             ) {
-                throw new RuntimeException(
-                    'Партия уже не находится в работе.'
-                );
-            }
 
-            /*
-             * Фактический исполнитель.
-             *
-             * ВАЖНО:
-             * он берётся из assigned_employee_id,
-             * а не из текущей сессии.
-             */
+                $messageType =
+                    'error';
 
-            $assignedEmployeeId =
-                (int) (
-                    $currentBatch[
-                        'assigned_employee_id'
-                    ]
-                    ??
-                    $currentBatch[
-                        'employee_id'
-                    ]
-                    ??
-                    0
-                );
+                $messageTitle =
+                    'Причину не вказано';
 
-            if ($assignedEmployeeId <= 0) {
-                throw new RuntimeException(
-                    'У партии не назначен исполнитель.'
-                );
-            }
+                $messageText =
+                    'Оберіть причину браку.';
 
-            /*
-             * Проверяем, что исполнитель существует
-             * и активен.
-             */
+            } else {
 
-            $assignedCheck = $db->prepare("
-                SELECT
-                    id,
-                    name,
-                    role,
-                    active,
-                    stage_id
-                FROM users
-                WHERE id = :id
-                  AND active = 1
-                LIMIT 1
-            ");
+                try {
 
-            $assignedCheck->execute([
-                ':id' => $assignedEmployeeId,
-            ]);
+                    $db->beginTransaction();
 
-            $assignedEmployee =
-                $assignedCheck->fetch(
-                    PDO::FETCH_ASSOC
-                );
+                    /*
+                     * Скло повинно належати цій партії.
+                     */
 
-            if (!$assignedEmployee) {
-                throw new RuntimeException(
-                    'Назначенный исполнитель не найден или отключён.'
-                );
-            }
+                    $itemStmt =
+                        $db->prepare("
+                            SELECT
+                                pbi.id
+                                    AS item_id,
 
-            /*
-             * Получаем элементы партии.
-             */
+                                pbi.status
+                                    AS item_status,
 
-            $itemsStmt = $db->prepare("
-                SELECT
-                    pbi.id AS batch_item_id,
-                    pbi.glass_id,
-                    pbi.status AS item_status,
+                                g.id,
+                                g.code,
+                                g.order_id,
+                                g.order_number,
+                                g.status,
+                                g.current_step_id,
+                                g.current_location,
 
-                    g.code,
-                    g.status AS glass_status,
-                    g.current_step_id,
-                    g.current_location,
-                    g.route_id,
+                                rs.name
+                                    AS stage_name
 
-                    rs.id AS route_step_id,
-                    rs.step_number,
-                    rs.name AS stage_name
+                            FROM production_batch_items pbi
 
-                FROM production_batch_items pbi
+                            JOIN glasses g
+                                ON g.id =
+                                    pbi.glass_id
 
-                JOIN glasses g
-                    ON g.id = pbi.glass_id
+                            JOIN route_steps rs
+                                ON rs.id =
+                                    g.current_step_id
 
-                JOIN route_steps rs
-                    ON rs.id = g.current_step_id
+                            WHERE pbi.batch_id =
+                                :batch_id
 
-                WHERE pbi.batch_id = :batch_id
+                              AND pbi.glass_id =
+                                :glass_id
 
-                ORDER BY pbi.id ASC
-            ");
+                            LIMIT 1
+                        ");
 
-            $itemsStmt->execute([
-                ':batch_id' => $batchId,
-            ]);
+                    $itemStmt->execute([
+                        ':batch_id' =>
+                            $batchId,
 
-            $currentItems =
-                $itemsStmt->fetchAll(
-                    PDO::FETCH_ASSOC
-                );
+                        ':glass_id' =>
+                            $glassId,
+                    ]);
 
-            if (!$currentItems) {
-                throw new RuntimeException(
-                    'В партии нет стекол.'
-                );
-            }
+                    $glass =
+                        $itemStmt->fetch(
+                            PDO::FETCH_ASSOC
+                        );
 
-            /*
-             * Запросы.
-             */
+                    if (!$glass) {
 
-            $operationInsert = $db->prepare("
-                INSERT INTO glass_operations (
-                    glass_id,
-                    employee_id,
-                    route_step_id,
-                    operation_type,
-                    from_stage,
-                    to_stage,
-                    result,
-                    batch_id,
-                    comment
-                )
-                VALUES (
-                    :glass_id,
-                    :employee_id,
-                    :route_step_id,
-                    :operation_type,
-                    :from_stage,
-                    :to_stage,
-                    :result,
-                    :batch_id,
-                    :comment
-                )
-            ");
+                        throw new RuntimeException(
+                            'Скло не входить до цієї партії.'
+                        );
+                    }
 
-            $historyInsert = $db->prepare("
-                INSERT INTO glass_history (
-                    glass_id,
-                    employee_id,
-                    old_status,
-                    new_status,
-                    old_location,
-                    new_location,
-                    comment
-                )
-                VALUES (
-                    :glass_id,
-                    :employee_id,
-                    :old_status,
-                    :new_status,
-                    :old_location,
-                    :new_location,
-                    :comment
-                )
-            ");
+                    if (
+                        $glass[
+                            'item_status'
+                        ]
+                        !==
+                        'pending'
+                    ) {
 
-            $itemUpdate = $db->prepare("
-                UPDATE production_batch_items
-                SET
-                    status = :status,
-                    completed_at = CURRENT_TIMESTAMP
-                WHERE id = :id
-            ");
+                        throw new RuntimeException(
+                            'Це скло вже оброблено у партії.'
+                        );
+                    }
 
-            $glassUpdate = $db->prepare("
-                UPDATE glasses
-                SET
-                    status = :status,
-                    current_step_id = :current_step_id,
-                    current_location = :current_location,
-                    employee_id = NULL,
-                    updated_at = CURRENT_TIMESTAMP
-                WHERE id = :id
-            ");
+                    if (
+                        (int)
+                        $glass[
+                            'current_step_id'
+                        ]
+                        !==
+                        (int)
+                        $batch[
+                            'route_step_id'
+                        ]
+                    ) {
 
-            $completedCount = 0;
-            $rejectedCount = 0;
+                        throw new RuntimeException(
+                            'Скло вже знаходиться на іншій дільниці.'
+                        );
+                    }
 
-            foreach ($currentItems as $item) {
+                    if (
+                        !in_array(
+                            $glass[
+                                'status'
+                            ],
+                            [
+                                'waiting',
+                                'in_progress',
+                            ],
+                            true
+                        )
+                    ) {
 
-                $itemId =
-                    (int) $item['batch_item_id'];
+                        throw new RuntimeException(
+                            'Поточний статус скла не дозволяє оформити брак.'
+                        );
+                    }
 
-                $glassId =
-                    (int) $item['glass_id'];
+                    $fullComment =
+                        $reason;
 
-                $result =
-                    $submittedResults[
-                        (string) $itemId
-                    ] ?? '';
+                    if (
+                        $comment !== ''
+                    ) {
 
-                if (
-                    !in_array(
-                        $result,
+                        $fullComment .=
+                            ': '
+                            . $comment;
+                    }
+
+                    /*
+                     * glass_operations
+                     */
+
+                    $operationStmt =
+                        $db->prepare("
+                            INSERT INTO glass_operations (
+                                glass_id,
+                                employee_id,
+                                route_step_id,
+                                operation_type,
+                                from_stage,
+                                to_stage,
+                                result,
+                                batch_id,
+                                comment
+                            )
+                            VALUES (
+                                :glass_id,
+                                :employee_id,
+                                :route_step_id,
+                                'rejection',
+                                :from_stage,
+                                NULL,
+                                'rejected',
+                                :batch_id,
+                                :comment
+                            )
+                        ");
+
+                    $operationStmt->execute([
+                        ':glass_id' =>
+                            $glassId,
+
+                        ':employee_id' =>
+                            (int)
+                            $user['id'],
+
+                        ':route_step_id' =>
+                            (int)
+                            $batch[
+                                'route_step_id'
+                            ],
+
+                        ':from_stage' =>
+                            $batch[
+                                'stage_name'
+                            ],
+
+                        ':batch_id' =>
+                            $batchId,
+
+                        ':comment' =>
+                            $fullComment,
+                    ]);
+
+                    /*
+                     * glass_history
+                     */
+
+                    $historyStmt =
+                        $db->prepare("
+                            INSERT INTO glass_history (
+                                glass_id,
+                                employee_id,
+                                old_status,
+                                new_status,
+                                old_location,
+                                new_location,
+                                comment
+                            )
+                            VALUES (
+                                :glass_id,
+                                :employee_id,
+                                :old_status,
+                                'rejected',
+                                :old_location,
+                                :new_location,
+                                :comment
+                            )
+                        ");
+
+                    $historyStmt->execute([
+                        ':glass_id' =>
+                            $glassId,
+
+                        ':employee_id' =>
+                            (int)
+                            $user['id'],
+
+                        ':old_status' =>
+                            $glass[
+                                'status'
+                            ],
+
+                        ':old_location' =>
+                            $glass[
+                                'current_location'
+                            ],
+
+                        ':new_location' =>
+                            'Брак — '
+                            . $batch[
+                                'stage_name'
+                            ],
+
+                        ':comment' =>
+                            $fullComment,
+                    ]);
+
+                    /*
+                     * glasses
+                     */
+
+                    $glassUpdate =
+                        $db->prepare("
+                            UPDATE glasses
+                            SET
+                                status =
+                                    'rejected',
+
+                                current_location =
+                                    :location,
+
+                                employee_id =
+                                    NULL,
+
+                                comment =
+                                    :comment,
+
+                                updated_at =
+                                    CURRENT_TIMESTAMP
+
+                            WHERE id =
+                                :id
+                        ");
+
+                    $glassUpdate->execute([
+                        ':location' =>
+                            'Брак — '
+                            . $batch[
+                                'stage_name'
+                            ],
+
+                        ':comment' =>
+                            $fullComment,
+
+                        ':id' =>
+                            $glassId,
+                    ]);
+
+                    /*
+                     * production_batch_items
+                     */
+
+                    $itemUpdate =
+                        $db->prepare("
+                            UPDATE production_batch_items
+                            SET
+                                status =
+                                    'rejected',
+
+                                completed_at =
+                                    CURRENT_TIMESTAMP
+
+                            WHERE batch_id =
+                                :batch_id
+
+                              AND glass_id =
+                                :glass_id
+                        ");
+
+                    $itemUpdate->execute([
+                        ':batch_id' =>
+                            $batchId,
+
+                        ':glass_id' =>
+                            $glassId,
+                    ]);
+
+                    /*
+                     * Внутрішнє сповіщення.
+                     */
+
+                    $notificationIds =
+                        notifyManagement(
+                            $db,
+                            'glass_rejected',
+                            'Оформлено брак скла',
+                            'Скло '
+                            . $glass[
+                                'code'
+                            ]
+                            . ' із замовлення '
+                            . $glass[
+                                'order_number'
+                            ]
+                            . ' оформлено як брак у партії №'
+                            . $batchId
+                            . ' на дільниці «'
+                            . $batch[
+                                'stage_name'
+                            ]
+                            . '». Причина: '
+                            . $fullComment,
+                            'glass',
+                            $glassId
+                        );
+
+                    /*
+                     * Audit.
+                     */
+
+                    writeBatchAudit(
+                        $db,
+                        (int)
+                        $user['id'],
+                        'reject_glass_batch',
+                        'glass',
+                        $glassId,
                         [
-                            'completed',
-                            'rejected',
-                        ],
-                        true
-                    )
-                ) {
-                    throw new RuntimeException(
-                        'Не указан результат для ' .
-                        $item['code'] .
-                        '.'
-                    );
-                }
+                            'status' =>
+                                $glass[
+                                    'status'
+                                ],
 
-                $currentRouteStepId =
-                    (int) $item['route_step_id'];
+                            'batch_id' =>
+                                $batchId,
+                        ],
+                        [
+                            'status' =>
+                                'rejected',
+
+                            'batch_id' =>
+                                $batchId,
+
+                            'reason' =>
+                                $fullComment,
+
+                            'notification_ids' =>
+                                $notificationIds,
+                        ]
+                    );
+
+                    $db->commit();
+
+                    /*
+                     * Telegram після commit.
+                     */
+
+                    $telegramResult = [
+                        'success' =>
+                            false,
+
+                        'sent' =>
+                            false,
+                    ];
+
+                    try {
+
+                        $telegramMessage =
+                            formatTelegramGlassRejected(
+                                $glass[
+                                    'code'
+                                ],
+                                $glass[
+                                    'order_number'
+                                ],
+                                $batch[
+                                    'stage_name'
+                                ]
+                            );
+
+                        $telegramMessage .=
+                            "\nПартія: №"
+                            . $batchId
+                            . "\nПричина: "
+                            . $fullComment;
+
+                        $telegramResult =
+                            sendTelegramToGroup(
+                                $db,
+                                $telegramMessage
+                            );
+
+                    } catch (
+                        Throwable
+                        $telegramException
+                    ) {
+
+                        $telegramResult = [
+                            'success' =>
+                                false,
+
+                            'sent' =>
+                                false,
+
+                            'error' =>
+                                $telegramException
+                                    ->getMessage(),
+                        ];
+                    }
+
+                    writeBatchAudit(
+                        $db,
+                        (int)
+                        $user['id'],
+                        'telegram_notification',
+                        'glass',
+                        $glassId,
+                        null,
+                        [
+                            'event' =>
+                                'glass_rejected',
+
+                            'batch_id' =>
+                                $batchId,
+
+                            'sent' =>
+                                $telegramResult[
+                                    'sent'
+                                ]
+                                ?? false,
+
+                            'group' =>
+                                $telegramResult[
+                                    'group_title'
+                                ]
+                                ?? null,
+
+                            'error' =>
+                                $telegramResult[
+                                    'error'
+                                ]
+                                ?? null,
+                        ]
+                    );
+
+                    $messageType =
+                        'success';
+
+                    $messageTitle =
+                        '❌ БРАК ОФОРМЛЕНО';
+
+                    $messageText =
+                        'Скло '
+                        . e(
+                            $glass[
+                                'code'
+                            ]
+                        )
+                        . ' позначено як брак. Причина: '
+                        . e(
+                            $fullComment
+                        );
+
+                } catch (
+                    Throwable
+                    $exception
+                ) {
+
+                    if (
+                        $db->inTransaction()
+                    ) {
+                        $db->rollBack();
+                    }
+
+                    $messageType =
+                        'error';
+
+                    $messageTitle =
+                        'Брак не оформлено';
+
+                    $messageText =
+                        e(
+                            $exception
+                                ->getMessage()
+                        );
+
+                    try {
+
+                        writeBatchAudit(
+                            $db,
+                            (int)
+                            $user['id'],
+                            'reject_glass_batch_error',
+                            'glass',
+                            $glassId > 0
+                                ? $glassId
+                                : null,
+                            null,
+                            [
+                                'batch_id' =>
+                                    $batchId,
+
+                                'error' =>
+                                    $exception
+                                        ->getMessage(),
+                            ]
+                        );
+
+                    } catch (
+                        Throwable
+                        $auditException
+                    ) {
+                        // Не змінюємо результат.
+                    }
+                }
+            }
+        }
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Завершення партії
+    |--------------------------------------------------------------------------
+    */
+
+    elseif (
+        $action ===
+        'complete_batch'
+    ) {
+
+        require_permission(
+            'production.complete_batch',
+            $user
+        );
+
+        if (
+            !$canWorkWithBatch
+        ) {
+
+            http_response_code(403);
+
+            exit(
+                'Немає доступу до партії.'
+            );
+        }
+
+        if (
+            !in_array(
+                $batch[
+                    'status'
+                ],
+                [
+                    'created',
+                    'in_progress',
+                ],
+                true
+            )
+        ) {
+
+            $messageType =
+                'error';
+
+            $messageTitle =
+                'Партію не завершено';
+
+            $messageText =
+                'Партія вже завершена або скасована.';
+
+        } else {
+
+            try {
+
+                $db->beginTransaction();
 
                 /*
-                 * Готово.
+                 * Повторно отримуємо партію.
                  */
 
-                if (
-                    $result === 'completed'
-                ) {
-
-                    $nextStmt = $db->prepare("
+                $currentBatchStmt =
+                    $db->prepare("
                         SELECT
-                            rs2.id,
-                            rs2.step_number,
-                            rs2.name
-                        FROM route_steps rs1
+                            id,
+                            status,
+                            route_step_id,
+                            assigned_employee_id,
+                            order_id
 
-                        JOIN route_steps rs2
-                            ON rs2.route_id = :route_id
-                           AND rs2.step_number =
-                               rs1.step_number + 1
+                        FROM production_batches
 
-                        WHERE rs1.id =
-                            :current_step_id
+                        WHERE id =
+                            :id
 
                         LIMIT 1
                     ");
 
+                $currentBatchStmt->execute([
+                    ':id' =>
+                        $batchId,
+                ]);
+
+                $currentBatch =
+                    $currentBatchStmt->fetch(
+                        PDO::FETCH_ASSOC
+                    );
+
+                if (!$currentBatch) {
+
+                    throw new RuntimeException(
+                        'Партію більше не знайдено.'
+                    );
+                }
+
+                if (
+                    !in_array(
+                        $currentBatch[
+                            'status'
+                        ],
+                        [
+                            'created',
+                            'in_progress',
+                        ],
+                        true
+                    )
+                ) {
+
+                    throw new RuntimeException(
+                        'Партію вже завершено.'
+                    );
+                }
+
+                /*
+                 * Незавершене скло.
+                 */
+
+                $itemsStmt =
+                    $db->prepare("
+                        SELECT
+                            pbi.id
+                                AS item_id,
+
+                            pbi.status
+                                AS item_status,
+
+                            g.id,
+                            g.code,
+                            g.order_id,
+                            g.order_number,
+                            g.status,
+                            g.current_step_id,
+                            g.current_location,
+                            g.route_id,
+
+                            rs.step_number,
+                            rs.name
+                                AS stage_name
+
+                        FROM production_batch_items pbi
+
+                        JOIN glasses g
+                            ON g.id =
+                                pbi.glass_id
+
+                        JOIN route_steps rs
+                            ON rs.id =
+                                g.current_step_id
+
+                        WHERE pbi.batch_id =
+                            :batch_id
+
+                          AND pbi.status =
+                            'pending'
+
+                        ORDER BY pbi.id
+                    ");
+
+                $itemsStmt->execute([
+                    ':batch_id' =>
+                        $batchId,
+                ]);
+
+                $pendingItems =
+                    $itemsStmt->fetchAll(
+                        PDO::FETCH_ASSOC
+                    );
+
+                $completedCount = 0;
+
+                /*
+                 * Завершуємо кожне pending-скло.
+                 */
+
+                foreach (
+                    $pendingItems
+                    as $glass
+                ) {
+
+                    if (
+                        (int)
+                        $glass[
+                            'current_step_id'
+                        ]
+                        !==
+                        (int)
+                        $batch[
+                            'route_step_id'
+                        ]
+                    ) {
+
+                        throw new RuntimeException(
+                            'Скло '
+                            . $glass[
+                                'code'
+                            ]
+                            . ' вже знаходиться на іншій дільниці.'
+                        );
+                    }
+
+                    /*
+                     * Наступний етап.
+                     */
+
+                    $nextStmt =
+                        $db->prepare("
+                            SELECT
+                                id,
+                                step_number,
+                                name
+
+                            FROM route_steps
+
+                            WHERE route_id =
+                                :route_id
+
+                              AND step_number =
+                                :step_number
+
+                            LIMIT 1
+                        ");
+
                     $nextStmt->execute([
                         ':route_id' =>
-                            (int) $item['route_id'],
+                            (int)
+                            $glass[
+                                'route_id'
+                            ],
 
-                        ':current_step_id' =>
-                            $currentRouteStepId,
+                        ':step_number' =>
+                            (int)
+                            $glass[
+                                'step_number'
+                            ]
+                            + 1,
                     ]);
 
                     $nextStep =
@@ -586,25 +1204,35 @@ if (
 
                     if ($nextStep) {
 
-                        $nextStepId =
-                            (int) $nextStep['id'];
-
                         $newStatus =
                             'waiting';
 
+                        $newStepId =
+                            (int)
+                            $nextStep[
+                                'id'
+                            ];
+
                         $newLocation =
-                            $nextStep['name'];
+                            $nextStep[
+                                'name'
+                            ];
 
                         $toStage =
-                            $nextStep['name'];
+                            $nextStep[
+                                'name'
+                            ];
 
                     } else {
 
-                        $nextStepId =
-                            $currentRouteStepId;
-
                         $newStatus =
                             'completed';
+
+                        $newStepId =
+                            (int)
+                            $glass[
+                                'current_step_id'
+                            ];
 
                         $newLocation =
                             'Готово';
@@ -614,479 +1242,566 @@ if (
                     }
 
                     /*
-                     * Производственная операция
-                     * записывается на Ивана,
-                     * а не на пользователя,
-                     * который нажал кнопку.
+                     * Операція.
                      */
 
-                    $operationInsert->execute([
+                    $operationStmt =
+                        $db->prepare("
+                            INSERT INTO glass_operations (
+                                glass_id,
+                                employee_id,
+                                route_step_id,
+                                operation_type,
+                                from_stage,
+                                to_stage,
+                                result,
+                                batch_id,
+                                comment
+                            )
+                            VALUES (
+                                :glass_id,
+                                :employee_id,
+                                :route_step_id,
+                                'production',
+                                :from_stage,
+                                :to_stage,
+                                'completed',
+                                :batch_id,
+                                'Операцію завершено у складі партії.'
+                            )
+                        ");
+
+                    $operationStmt->execute([
                         ':glass_id' =>
-                            $glassId,
+                            (int)
+                            $glass['id'],
 
                         ':employee_id' =>
-                            $assignedEmployeeId,
+                            (int)
+                            $user['id'],
 
                         ':route_step_id' =>
-                            $currentRouteStepId,
-
-                        ':operation_type' =>
-                            'production',
+                            (int)
+                            $glass[
+                                'current_step_id'
+                            ],
 
                         ':from_stage' =>
-                            $item['stage_name'],
+                            $glass[
+                                'stage_name'
+                            ],
 
                         ':to_stage' =>
                             $toStage,
 
-                        ':result' =>
-                            'completed',
-
                         ':batch_id' =>
                             $batchId,
-
-                        ':comment' =>
-                            'Операция завершена в составе партии.',
                     ]);
 
                     /*
-                     * История стекла.
+                     * Історія.
                      */
 
-                    $historyInsert->execute([
+                    $historyStmt =
+                        $db->prepare("
+                            INSERT INTO glass_history (
+                                glass_id,
+                                employee_id,
+                                old_status,
+                                new_status,
+                                old_location,
+                                new_location,
+                                comment
+                            )
+                            VALUES (
+                                :glass_id,
+                                :employee_id,
+                                :old_status,
+                                :new_status,
+                                :old_location,
+                                :new_location,
+                                'Партію завершено.'
+                            )
+                        ");
+
+                    $historyStmt->execute([
                         ':glass_id' =>
-                            $glassId,
+                            (int)
+                            $glass['id'],
 
                         ':employee_id' =>
-                            $assignedEmployeeId,
+                            (int)
+                            $user['id'],
 
                         ':old_status' =>
-                            $item['glass_status'],
+                            $glass[
+                                'status'
+                            ],
 
                         ':new_status' =>
                             $newStatus,
 
                         ':old_location' =>
-                            $item['current_location'],
+                            $glass[
+                                'current_location'
+                            ],
 
                         ':new_location' =>
                             $newLocation,
-
-                        ':comment' =>
-                            $nextStep
-                                ? 'Стекло передано на следующий этап.'
-                                : 'Маршрут стекла полностью завершён.',
                     ]);
 
                     /*
-                     * Обновляем стекло.
+                     * Скло.
                      */
+
+                    $glassUpdate =
+                        $db->prepare("
+                            UPDATE glasses
+                            SET
+                                status =
+                                    :status,
+
+                                current_step_id =
+                                    :step_id,
+
+                                current_location =
+                                    :location,
+
+                                employee_id =
+                                    NULL,
+
+                                updated_at =
+                                    CURRENT_TIMESTAMP
+
+                            WHERE id =
+                                :id
+                        ");
 
                     $glassUpdate->execute([
                         ':status' =>
                             $newStatus,
 
-                        ':current_step_id' =>
-                            $nextStepId,
+                        ':step_id' =>
+                            $newStepId,
 
-                        ':current_location' =>
+                        ':location' =>
                             $newLocation,
 
                         ':id' =>
-                            $glassId,
+                            (int)
+                            $glass['id'],
                     ]);
-
-                    $itemUpdate->execute([
-                        ':status' =>
-                            'completed',
-
-                        ':id' =>
-                            $itemId,
-                    ]);
-
-                    $completedCount++;
-
-                } else {
 
                     /*
-                     * Брак.
+                     * Item.
                      */
 
-                    $operationInsert->execute([
-                        ':glass_id' =>
-                            $glassId,
-
-                        ':employee_id' =>
-                            $assignedEmployeeId,
-
-                        ':route_step_id' =>
-                            $currentRouteStepId,
-
-                        ':operation_type' =>
-                            'production',
-
-                        ':from_stage' =>
-                            $item['stage_name'],
-
-                        ':to_stage' =>
-                            $item['stage_name'],
-
-                        ':result' =>
-                            'rejected',
-
-                        ':batch_id' =>
-                            $batchId,
-
-                        ':comment' =>
-                            'Стекло отмечено как брак в партии.',
-                    ]);
-
-                    $historyInsert->execute([
-                        ':glass_id' =>
-                            $glassId,
-
-                        ':employee_id' =>
-                            $assignedEmployeeId,
-
-                        ':old_status' =>
-                            $item['glass_status'],
-
-                        ':new_status' =>
-                            'rejected',
-
-                        ':old_location' =>
-                            $item['current_location'],
-
-                        ':new_location' =>
-                            $item['current_location'],
-
-                        ':comment' =>
-                            'Стекло отмечено как брак.',
-                    ]);
-
-                    $glassUpdate->execute([
-                        ':status' =>
-                            'rejected',
-
-                        ':current_step_id' =>
-                            $currentRouteStepId,
-
-                        ':current_location' =>
-                            $item['current_location'],
-
-                        ':id' =>
-                            $glassId,
-                    ]);
-
-                    $itemUpdate->execute([
-                        ':status' =>
-                            'rejected',
-
-                        ':id' =>
-                            $itemId,
-                    ]);
-
-                    $rejectedCount++;
-                }
-            }
-
-            /*
-             * Закрываем партию.
-             */
-
-            $batchUpdate = $db->prepare("
-                UPDATE production_batches
-                SET
-                    status = 'completed',
-                    completed_at = CURRENT_TIMESTAMP
-                WHERE id = :id
-            ");
-
-            $batchUpdate->execute([
-                ':id' => $batchId,
-            ]);
-
-            /*
-             * В audit_log записываем именно пользователя,
-             * который нажал кнопку.
-             *
-             * Это может быть менеджер, начальник участка
-             * или сам Иван.
-             */
-
-            $audit = $db->prepare("
-                INSERT INTO audit_log (
-                    user_id,
-                    action,
-                    entity_type,
-                    entity_id,
-                    old_value,
-                    new_value,
-                    ip_address,
-                    user_agent
-                )
-                VALUES (
-                    :user_id,
-                    'complete_batch',
-                    'batch',
-                    :entity_id,
-                    :old_value,
-                    :new_value,
-                    :ip_address,
-                    :user_agent
-                )
-            ");
-
-            $audit->execute([
-                ':user_id' =>
-                    (int) $user['id'],
-
-                ':entity_id' =>
-                    $batchId,
-
-                ':old_value' =>
-                    json_encode(
-                        [
-                            'status' =>
-                                'in_progress',
-
-                            'assigned_employee_id' =>
-                                $assignedEmployeeId,
-                        ],
-                        JSON_UNESCAPED_UNICODE
-                    ),
-
-                ':new_value' =>
-                    json_encode(
-                        [
-                            'status' =>
-                                'completed',
-
-                            'completed_count' =>
-                                $completedCount,
-
-                            'rejected_count' =>
-                                $rejectedCount,
-
-                            'completed_by_user_id' =>
-                                (int) $user['id'],
-                        ],
-                        JSON_UNESCAPED_UNICODE
-                    ),
-
-                ':ip_address' =>
-                    $_SERVER[
-                        'REMOTE_ADDR'
-                    ] ?? null,
-
-                ':user_agent' =>
-                    $_SERVER[
-                        'HTTP_USER_AGENT'
-                    ] ?? null,
-            ]);
-
-            /*
-             * Проверяем завершение заказа.
-             */
-
-            $orderCheckStmt = $db->prepare("
-                SELECT
-                    COUNT(*) AS total_glasses,
-
-                    SUM(
-                        CASE
-                            WHEN status = 'completed'
-                            THEN 1
-                            ELSE 0
-                        END
-                    ) AS completed_glasses
-
-                FROM glasses
-
-                WHERE order_id = :order_id
-            ");
-
-            $orderCheckStmt->execute([
-                ':order_id' =>
-                    (int) $currentBatch[
-                        'order_id'
-                    ],
-            ]);
-
-            $orderProgress =
-                $orderCheckStmt->fetch(
-                    PDO::FETCH_ASSOC
-                );
-
-            if (
-                (int) (
-                    $orderProgress[
-                        'total_glasses'
-                    ] ?? 0
-                ) > 0
-
-                &&
-
-                (int) (
-                    $orderProgress[
-                        'completed_glasses'
-                    ] ?? 0
-                )
-
-                ===
-
-                (int) (
-                    $orderProgress[
-                        'total_glasses'
-                    ] ?? 0
-                )
-            ) {
-
-                $orderComplete = $db->prepare("
-                    UPDATE orders
-                    SET
-                        status = 'completed',
-                        production_completed_at =
-                            CURRENT_TIMESTAMP,
-                        updated_at =
-                            CURRENT_TIMESTAMP
-                    WHERE id = :id
-                      AND status <> 'completed'
-                ");
-
-                $orderComplete->execute([
-                    ':id' =>
-                        (int) $currentBatch[
-                            'order_id'
-                        ],
-                ]);
-
-                $orderAudit = $db->prepare("
-                    INSERT INTO audit_log (
-                        user_id,
-                        action,
-                        entity_type,
-                        entity_id,
-                        old_value,
-                        new_value,
-                        ip_address,
-                        user_agent
-                    )
-                    VALUES (
-                        NULL,
-                        'order_completed',
-                        'order',
-                        :entity_id,
-                        NULL,
-                        :new_value,
-                        :ip_address,
-                        :user_agent
-                    )
-                ");
-
-                $orderAudit->execute([
-                    ':entity_id' =>
-                        (int) $currentBatch[
-                            'order_id'
-                        ],
-
-                    ':new_value' =>
-                        json_encode(
-                            [
-                                'status' =>
+                    $itemUpdate =
+                        $db->prepare("
+                            UPDATE production_batch_items
+                            SET
+                                status =
                                     'completed',
 
-                                'total_glasses' =>
-                                    (int) (
-                                        $orderProgress[
-                                            'total_glasses'
-                                        ] ?? 0
-                                    ),
-                            ],
-                            JSON_UNESCAPED_UNICODE
-                        ),
+                                completed_at =
+                                    CURRENT_TIMESTAMP
 
-                    ':ip_address' =>
-                        $_SERVER[
-                            'REMOTE_ADDR'
-                        ] ?? null,
+                            WHERE batch_id =
+                                :batch_id
 
-                    ':user_agent' =>
-                        $_SERVER[
-                            'HTTP_USER_AGENT'
-                        ] ?? null,
+                              AND glass_id =
+                                :glass_id
+                        ");
+
+                    $itemUpdate->execute([
+                        ':batch_id' =>
+                            $batchId,
+
+                        ':glass_id' =>
+                            (int)
+                            $glass['id'],
+                    ]);
+
+                    /*
+                     * Сповіщення наступній дільниці.
+                     */
+
+                    if ($nextStep) {
+
+                        $nextStageStmt =
+                            $db->prepare("
+                                SELECT id
+                                FROM production_stages
+                                WHERE name =
+                                    :name
+                                  AND active = 1
+                                LIMIT 1
+                            ");
+
+                        $nextStageStmt->execute([
+                            ':name' =>
+                                $nextStep[
+                                    'name'
+                                ],
+                        ]);
+
+                        $nextStageId =
+                            $nextStageStmt
+                                ->fetchColumn();
+
+                        if (
+                            $nextStageId !== false
+                        ) {
+
+                            notifyStage(
+                                $db,
+                                (int)
+                                $nextStageId,
+                                'glass_moved',
+                                'Нове скло надійшло на дільницю',
+                                'Скло '
+                                . $glass[
+                                    'code'
+                                ]
+                                . ' із замовлення '
+                                . $glass[
+                                    'order_number'
+                                ]
+                                . ' надійшло на дільницю «'
+                                . $nextStep[
+                                    'name'
+                                ]
+                                . '» після завершення партії №'
+                                . $batchId
+                                . '.',
+                                'glass',
+                                (int)
+                                $glass['id']
+                            );
+                        }
+                    }
+
+                    $completedCount++;
+                }
+
+                /*
+                 * Скільки браку вже є.
+                 */
+
+                $rejectedStmt =
+                    $db->prepare("
+                        SELECT COUNT(*)
+                        FROM production_batch_items
+                        WHERE batch_id =
+                            :batch_id
+                          AND status =
+                            'rejected'
+                    ");
+
+                $rejectedStmt->execute([
+                    ':batch_id' =>
+                        $batchId,
                 ]);
+
+                $rejectedCount =
+                    (int)
+                    $rejectedStmt
+                        ->fetchColumn();
+
+                /*
+                 * Завершуємо партію.
+                 */
+
+                $batchUpdate =
+                    $db->prepare("
+                        UPDATE production_batches
+                        SET
+                            status =
+                                'completed',
+
+                            completed_at =
+                                CURRENT_TIMESTAMP
+
+                        WHERE id =
+                            :id
+                    ");
+
+                $batchUpdate->execute([
+                    ':id' =>
+                        $batchId,
+                ]);
+
+                writeBatchAudit(
+                    $db,
+                    (int)
+                    $user['id'],
+                    'complete_batch',
+                    'batch',
+                    $batchId,
+                    [
+                        'status' =>
+                            $batch[
+                                'status'
+                            ],
+                    ],
+                    [
+                        'status' =>
+                            'completed',
+
+                        'completed_count' =>
+                            $completedCount,
+
+                        'rejected_count' =>
+                            $rejectedCount,
+
+                        'completed_by_user_id' =>
+                            (int)
+                            $user['id'],
+                    ]
+                );
+
+                $db->commit();
+
+                /*
+                 * Telegram.
+                 */
+
+                try {
+
+                    $telegramMessage =
+                        formatTelegramBatchCompleted(
+                            $batchId,
+                            $batch[
+                                'order_number'
+                            ],
+                            $batch[
+                                'stage_name'
+                            ],
+                            $user[
+                                'name'
+                            ]
+                            ?? '',
+                            $completedCount,
+                            $rejectedCount
+                        );
+
+                    $telegramResult =
+                        sendTelegramToGroup(
+                            $db,
+                            $telegramMessage
+                        );
+
+                    writeBatchAudit(
+                        $db,
+                        (int)
+                        $user['id'],
+                        'telegram_notification',
+                        'batch',
+                        $batchId,
+                        null,
+                        [
+                            'event' =>
+                                'batch_completed',
+
+                            'sent' =>
+                                $telegramResult[
+                                    'sent'
+                                ]
+                                ?? false,
+
+                            'group' =>
+                                $telegramResult[
+                                    'group_title'
+                                ]
+                                ?? null,
+
+                            'error' =>
+                                $telegramResult[
+                                    'error'
+                                ]
+                                ?? null,
+                        ]
+                    );
+
+                } catch (
+                    Throwable
+                    $telegramException
+                ) {
+                    // Telegram не змінює виробничий результат.
+                }
+
+                $messageType =
+                    'success';
+
+                $messageTitle =
+                    '✅ ПАРТІЮ ЗАВЕРШЕНО';
+
+                $messageText =
+                    'Готово: '
+                    . $completedCount
+                    . '. Брак: '
+                    . $rejectedCount
+                    . '.';
+
+                /*
+                 * Оновлюємо локальний статус сторінки.
+                 */
+
+                $batch[
+                    'status'
+                ] =
+                    'completed';
+
+            } catch (
+                Throwable
+                $exception
+            ) {
+
+                if (
+                    $db->inTransaction()
+                ) {
+                    $db->rollBack();
+                }
+
+                $messageType =
+                    'error';
+
+                $messageTitle =
+                    'Партію не завершено';
+
+                $messageText =
+                    e(
+                        $exception
+                            ->getMessage()
+                    );
             }
-
-            $db->commit();
-
-            $success =
-                'Партия №' .
-                $batchId .
-                ' завершена. ' .
-                'Готово: ' .
-                $completedCount .
-                ', брак: ' .
-                $rejectedCount .
-                '. ' .
-                'Исполнитель: ' .
-                $assignedEmployee['name'] .
-                '.';
-
-            $batch['status'] =
-                'completed';
-
-            $items = loadBatchItems(
-                $db,
-                $batchId
-            );
-
-        } catch (Throwable $exception) {
-
-            if ($db->inTransaction()) {
-                $db->rollBack();
-            }
-
-            $error =
-                $exception->getMessage();
         }
     }
 }
 
 /*
 |--------------------------------------------------------------------------
-| Статистика партии
+| Оновлюємо дані партії після POST
 |--------------------------------------------------------------------------
 */
 
-$totalItems = count($items);
+$batchStmt->execute([
+    ':id' =>
+        $batchId,
+]);
 
-$completedItems = 0;
-$rejectedItems = 0;
-$pendingItems = 0;
+$batch =
+    $batchStmt->fetch(
+        PDO::FETCH_ASSOC
+    );
 
-foreach ($items as $item) {
+/*
+|--------------------------------------------------------------------------
+| Скло партії
+|--------------------------------------------------------------------------
+*/
+
+$itemsStmt =
+    $db->prepare("
+        SELECT
+            pbi.id
+                AS item_id,
+
+            pbi.status
+                AS item_status,
+
+            pbi.completed_at,
+
+            g.id
+                AS glass_id,
+
+            g.code,
+            g.order_number,
+            g.glass_type,
+            g.width,
+            g.height,
+            g.thickness,
+            g.quantity,
+            g.status
+                AS glass_status,
+
+            g.current_location
+
+        FROM production_batch_items pbi
+
+        JOIN glasses g
+            ON g.id =
+                pbi.glass_id
+
+        WHERE pbi.batch_id =
+            :batch_id
+
+        ORDER BY pbi.id
+    ");
+
+$itemsStmt->execute([
+    ':batch_id' =>
+        $batchId,
+]);
+
+$items =
+    $itemsStmt->fetchAll(
+        PDO::FETCH_ASSOC
+    );
+
+$totalCount =
+    count($items);
+
+$completedCount = 0;
+$rejectedCount = 0;
+$pendingCount = 0;
+$totalArea = 0.0;
+
+foreach (
+    $items
+    as $item
+) {
 
     if (
-        $item['item_status'] ===
+        $item[
+            'item_status'
+        ]
+        ===
         'completed'
     ) {
-        $completedItems++;
-
+        $completedCount++;
     } elseif (
-        $item['item_status'] ===
+        $item[
+            'item_status'
+        ]
+        ===
         'rejected'
     ) {
-        $rejectedItems++;
-
+        $rejectedCount++;
     } else {
-        $pendingItems++;
+        $pendingCount++;
     }
+
+    $totalArea +=
+        (
+            (int)
+            $item['width']
+            *
+            (int)
+            $item['height']
+            *
+            max(
+                1,
+                (int)
+                $item['quantity']
+            )
+        )
+        / 1000000;
 }
 
 ?>
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="uk">
 
 <head>
 
@@ -1098,148 +1813,165 @@ foreach ($items as $item) {
     >
 
     <title>
-        Партия №<?= (int) $batchId ?>
-        — OPTIMA GLASS
+        Партія №<?= $batchId ?> — OPTIMA GLASS
     </title>
-
-    <link
-        rel="stylesheet"
-        href="/assets/css/app.css"
-    >
 
     <style>
 
-        .batch-page {
-            max-width: 1300px;
+        * {
+            box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            background: #f4f6f8;
+            font-family: Arial, sans-serif;
+        }
+
+        .page {
+            max-width: 1200px;
             margin: 0 auto;
             padding: 30px 20px 60px;
         }
 
-        .batch-header {
-            margin-bottom: 25px;
-        }
-
-        .batch-title {
-            margin-bottom: 8px;
-        }
-
-        .batch-meta {
-            color: #6b7280;
-        }
-
-        .batch-summary {
-            display: grid;
-            grid-template-columns:
-                repeat(5, minmax(0, 1fr));
-            gap: 14px;
-            margin-bottom: 25px;
-        }
-
-        .summary-card {
-            padding: 18px;
-            border: 1px solid #e5e7eb;
-            border-radius: 12px;
-            background: #fff;
-        }
-
-        .summary-number {
-            display: block;
-            margin-top: 5px;
-            font-size: 24px;
-            font-weight: 700;
-        }
-
-        .message {
-            padding: 13px 16px;
-            border-radius: 9px;
+        .card {
             margin-bottom: 20px;
-        }
-
-        .message-success {
-            color: #166534;
-            background: #dcfce7;
-        }
-
-        .message-error {
-            color: #991b1b;
-            background: #fee2e2;
-        }
-
-        .batch-card {
             padding: 24px;
             border: 1px solid #e5e7eb;
             border-radius: 14px;
             background: #fff;
         }
 
-        .batch-table-wrap {
+        h1,
+        h2 {
+            margin-top: 0;
+        }
+
+        .meta {
+            color: #6b7280;
+            line-height: 1.6;
+        }
+
+        .summary {
+            display: grid;
+            grid-template-columns:
+                repeat(4, minmax(0, 1fr));
+            gap: 12px;
+            margin-top: 20px;
+        }
+
+        .summary-card {
+            padding: 15px;
+            border-radius: 10px;
+            background: #f9fafb;
+        }
+
+        .summary-value {
+            display: block;
+            margin-top: 6px;
+            font-size: 24px;
+            font-weight: 700;
+        }
+
+        .message {
+            margin-bottom: 20px;
+            padding: 16px;
+            border-radius: 10px;
+        }
+
+        .message.success {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .message.error {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .table-wrap {
             overflow-x: auto;
         }
 
-        .batch-table {
+        table {
             width: 100%;
             min-width: 950px;
             border-collapse: collapse;
         }
 
-        .batch-table th,
-        .batch-table td {
-            padding: 13px 10px;
+        th,
+        td {
+            padding: 11px 9px;
             border-bottom: 1px solid #e5e7eb;
             text-align: left;
-            vertical-align: middle;
+            vertical-align: top;
         }
 
-        .batch-table th {
-            white-space: nowrap;
-        }
-
-        .glass-code {
+        .status {
             font-weight: 700;
         }
 
-        .result-select {
-            min-width: 140px;
-            padding: 8px 10px;
+        .reject-form {
+            display: grid;
+            grid-template-columns:
+                minmax(130px, 180px)
+                minmax(160px, 1fr)
+                auto;
+            gap: 7px;
         }
 
-        .batch-footer {
-            display: flex;
-            justify-content: space-between;
+        select,
+        input {
+            min-height: 38px;
+            padding: 0 9px;
+            border: 1px solid #d1d5db;
+            border-radius: 7px;
+        }
+
+        .button {
+            min-height: 40px;
+            padding: 0 14px;
+            border: 0;
+            border-radius: 8px;
+            cursor: pointer;
+            font-weight: 700;
+        }
+
+        .button-danger {
+            background: #b91c1c;
+            color: #fff;
+        }
+
+        .button-primary {
+            background: #111827;
+            color: #fff;
+        }
+
+        .button-secondary {
+            display: inline-flex;
             align-items: center;
-            gap: 15px;
-            margin-top: 22px;
-            flex-wrap: wrap;
+            padding: 0 14px;
+            min-height: 40px;
+            border-radius: 8px;
+            background: #f3f4f6;
+            color: #111827;
+            text-decoration: none;
         }
 
-        .batch-warning {
-            color: #6b7280;
-            font-size: 13px;
+        .complete-form {
+            margin-top: 20px;
         }
 
-        .finish-button {
-            min-height: 44px;
-            padding: 10px 18px;
-        }
+        @media (
+            max-width: 800px
+        ) {
 
-        .batch-completed {
-            padding: 20px;
-            background: #f9fafb;
-            border-radius: 10px;
-        }
-
-        @media (max-width: 900px) {
-
-            .batch-summary {
+            .summary {
                 grid-template-columns:
-                    repeat(2, minmax(0, 1fr));
+                    repeat(2, 1fr);
             }
 
-        }
-
-        @media (max-width: 600px) {
-
-            .batch-summary {
+            .reject-form {
                 grid-template-columns: 1fr;
             }
 
@@ -1251,181 +1983,429 @@ foreach ($items as $item) {
 
 <body>
 
-<?php require __DIR__ . '/../src/partials/header.php'; ?>
+<?php
+require __DIR__
+    . '/../src/partials/header.php';
+?>
 
-<main class="batch-page">
+<main class="page">
 
-    <header class="batch-header">
+    <section class="card">
 
-        <h1 class="batch-title">
-            Партия №<?= (int) $batchId ?>
+        <h1>
+            Партія №<?= $batchId ?>
         </h1>
 
-        <div class="batch-meta">
+        <div class="meta">
 
-            Заказ:
+            Замовлення:
             <strong>
-                <?= e($batch['order_number']) ?>
+                <?= e(
+                    $batch[
+                        'order_number'
+                    ]
+                ) ?>
             </strong>
 
-            ·
+            <br>
 
-            Участок:
+            Дільниця:
             <strong>
-                <?= e($batch['stage_name']) ?>
+                <?= e(
+                    $batch[
+                        'stage_name'
+                    ]
+                ) ?>
             </strong>
 
-            ·
+            <br>
 
-            Исполнитель:
+            Виконавець:
             <strong>
                 <?= e(
                     $batch[
                         'assigned_employee_name'
                     ]
-                    ??
-                    'Не назначен'
+                    ?? 'Не призначено'
                 ) ?>
             </strong>
 
-            <?php if (
-                !empty($batch['creator_name'])
-            ): ?>
+            <br>
 
-                ·
-
-                Создал:
-                <strong>
-                    <?= e(
-                        $batch[
-                            'creator_name'
-                        ]
-                    ) ?>
-                </strong>
-
-            <?php endif; ?>
-
-        </div>
-
-    </header>
-
-
-    <?php if ($error !== ''): ?>
-
-        <div class="message message-error">
-            <?= e($error) ?>
-        </div>
-
-    <?php endif; ?>
-
-
-    <?php if ($success !== ''): ?>
-
-        <div class="message message-success">
-            <?= e($success) ?>
-        </div>
-
-    <?php endif; ?>
-
-
-    <section class="batch-summary">
-
-        <div class="summary-card">
-
-            <div>
-                Приоритет
-            </div>
-
-            <span class="summary-number">
-
+            Статус:
+            <strong>
                 <?= e(
-                    priorityLabel(
-                        (int) $batch['priority']
-                    )
+                    $batch[
+                        'status'
+                    ]
                 ) ?>
-
-            </span>
+            </strong>
 
         </div>
 
 
-        <div class="summary-card">
+        <div class="summary">
 
-            <div>
-                Всего
+            <div class="summary-card">
+
+                Всього
+
+                <span class="summary-value">
+                    <?= $totalCount ?>
+                </span>
+
             </div>
 
-            <span class="summary-number">
-                <?= $totalItems ?>
-            </span>
+            <div class="summary-card">
 
-        </div>
-
-
-        <div class="summary-card">
-
-            <div>
                 Готово
+
+                <span class="summary-value">
+                    <?= $completedCount ?>
+                </span>
+
             </div>
 
-            <span class="summary-number">
-                <?= $completedItems ?>
-            </span>
+            <div class="summary-card">
 
-        </div>
-
-
-        <div class="summary-card">
-
-            <div>
                 Брак
+
+                <span class="summary-value">
+                    <?= $rejectedCount ?>
+                </span>
+
             </div>
 
-            <span class="summary-number">
-                <?= $rejectedItems ?>
-            </span>
+            <div class="summary-card">
 
-        </div>
+                Площа
 
+                <span class="summary-value">
 
-        <div class="summary-card">
+                    <?= number_format(
+                        $totalArea,
+                        2,
+                        ',',
+                        ' '
+                    ) ?>
 
-            <div>
-                Ожидает
+                    м²
+
+                </span>
+
             </div>
-
-            <span class="summary-number">
-                <?= $pendingItems ?>
-            </span>
 
         </div>
 
     </section>
 
 
-    <section class="batch-card">
+    <?php if (
+        $messageType !== ''
+    ): ?>
+
+        <div
+            class="message <?= e(
+                $messageType
+            ) ?>"
+        >
+
+            <strong>
+                <?= e(
+                    $messageTitle
+                ) ?>
+            </strong>
+
+            <br><br>
+
+            <?= $messageText ?>
+
+        </div>
+
+    <?php endif; ?>
+
+
+    <section class="card">
 
         <h2>
-            Стекла партии
+            Скло партії
         </h2>
 
+        <div class="table-wrap">
 
-        <?php if (!$items): ?>
+            <table>
 
-            <div class="batch-completed">
-                В партии нет стекол.
-            </div>
+                <thead>
 
-        <?php elseif (
-            $batch['status'] === 'in_progress'
+                    <tr>
+                        <th>#</th>
+                        <th>Скло</th>
+                        <th>Розмір</th>
+                        <th>Товщина</th>
+                        <th>Статус</th>
+                        <th>Розташування</th>
+                        <th>Дія</th>
+                    </tr>
+
+                </thead>
+
+                <tbody>
+
+                <?php foreach (
+                    $items
+                    as $index =>
+                        $item
+                ): ?>
+
+                    <tr>
+
+                        <td>
+                            <?= $index + 1 ?>
+                        </td>
+
+                        <td>
+
+                            <strong>
+                                <?= e(
+                                    $item[
+                                        'code'
+                                    ]
+                                ) ?>
+                            </strong>
+
+                            <?php if (
+                                !empty(
+                                    $item[
+                                        'glass_type'
+                                    ]
+                                )
+                            ): ?>
+
+                                <br>
+
+                                <small>
+                                    <?= e(
+                                        $item[
+                                            'glass_type'
+                                        ]
+                                    ) ?>
+                                </small>
+
+                            <?php endif; ?>
+
+                        </td>
+
+                        <td>
+
+                            <?= (int)
+                                $item[
+                                    'width'
+                                ] ?>
+
+                            ×
+
+                            <?= (int)
+                                $item[
+                                    'height'
+                                ] ?>
+
+                            мм
+
+                        </td>
+
+                        <td>
+
+                            <?= $item[
+                                'thickness'
+                            ] !== null
+                                ? e(
+                                    (string)
+                                    $item[
+                                        'thickness'
+                                    ]
+                                ) . ' мм'
+                                : '—'
+                            ?>
+
+                        </td>
+
+                        <td class="status">
+
+                            <?php
+
+                            echo match (
+                                $item[
+                                    'item_status'
+                                ]
+                            ) {
+                                'completed' =>
+                                    '✅ Готово',
+
+                                'rejected' =>
+                                    '❌ Брак',
+
+                                default =>
+                                    '⏳ Очікує',
+                            };
+
+                            ?>
+
+                        </td>
+
+                        <td>
+
+                            <?= e(
+                                $item[
+                                    'current_location'
+                                ]
+                            ) ?>
+
+                        </td>
+
+                        <td>
+
+                            <?php if (
+                                $item[
+                                    'item_status'
+                                ]
+                                === 'pending'
+                                &&
+                                $canReject
+                                &&
+                                in_array(
+                                    $batch[
+                                        'status'
+                                    ],
+                                    [
+                                        'created',
+                                        'in_progress',
+                                    ],
+                                    true
+                                )
+                            ): ?>
+
+                                <form
+                                    method="post"
+                                    class="reject-form"
+                                >
+
+                                    <input
+                                        type="hidden"
+                                        name="csrf_token"
+                                        value="<?= e(
+                                            $csrfToken
+                                        ) ?>"
+                                    >
+
+                                    <input
+                                        type="hidden"
+                                        name="action"
+                                        value="reject_item"
+                                    >
+
+                                    <input
+                                        type="hidden"
+                                        name="batch_id"
+                                        value="<?= $batchId ?>"
+                                    >
+
+                                    <input
+                                        type="hidden"
+                                        name="glass_id"
+                                        value="<?= (int)
+                                            $item[
+                                                'glass_id'
+                                            ] ?>"
+                                    >
+
+                                    <select
+                                        name="reason"
+                                        required
+                                    >
+
+                                        <option value="">
+                                            Причина
+                                        </option>
+
+                                        <?php foreach (
+                                            $rejectionReasons
+                                            as $rejectionReason
+                                        ): ?>
+
+                                            <option
+                                                value="<?= e(
+                                                    $rejectionReason
+                                                ) ?>"
+                                            >
+                                                <?= e(
+                                                    $rejectionReason
+                                                ) ?>
+                                            </option>
+
+                                        <?php endforeach; ?>
+
+                                    </select>
+
+                                    <input
+                                        type="text"
+                                        name="comment"
+                                        placeholder="Коментар"
+                                    >
+
+                                    <button
+                                        type="submit"
+                                        class="button button-danger"
+                                    >
+                                        ❌ Брак
+                                    </button>
+
+                                </form>
+
+                            <?php else: ?>
+
+                                —
+
+                            <?php endif; ?>
+
+                        </td>
+
+                    </tr>
+
+                <?php endforeach; ?>
+
+                </tbody>
+
+            </table>
+
+        </div>
+
+
+        <?php if (
+            $canComplete
+            &&
+            in_array(
+                $batch[
+                    'status'
+                ],
+                [
+                    'created',
+                    'in_progress',
+                ],
+                true
+            )
         ): ?>
 
-            <form method="post">
+            <form
+                method="post"
+                class="complete-form"
+            >
 
                 <input
                     type="hidden"
                     name="csrf_token"
-                    value="<?= e($csrfToken) ?>"
+                    value="<?= e(
+                        $csrfToken
+                    ) ?>"
                 >
 
                 <input
@@ -1437,211 +2417,32 @@ foreach ($items as $item) {
                 <input
                     type="hidden"
                     name="batch_id"
-                    value="<?= (int) $batchId ?>"
+                    value="<?= $batchId ?>"
                 >
 
-
-                <div class="batch-table-wrap">
-
-                    <table class="batch-table">
-
-                        <thead>
-
-                            <tr>
-                                <th>#</th>
-                                <th>Стекло</th>
-                                <th>Размер</th>
-                                <th>Толщина</th>
-                                <th>Этап</th>
-                                <th>Результат</th>
-                            </tr>
-
-                        </thead>
-
-                        <tbody>
-
-                        <?php foreach (
-                            $items
-                            as $index => $item
-                        ): ?>
-
-                            <tr>
-
-                                <td>
-                                    <?= $index + 1 ?>
-                                </td>
-
-                                <td>
-
-                                    <div class="glass-code">
-                                        <?= e(
-                                            $item['code']
-                                        ) ?>
-                                    </div>
-
-                                    <?php if (
-                                        $item['glass_type']
-                                    ): ?>
-
-                                        <small>
-                                            <?= e(
-                                                $item[
-                                                    'glass_type'
-                                                ]
-                                            ) ?>
-                                        </small>
-
-                                    <?php endif; ?>
-
-                                </td>
-
-                                <td>
-
-                                    <?= (int)
-                                        $item['width'] ?>
-
-                                    ×
-
-                                    <?= (int)
-                                        $item['height'] ?>
-
-                                    мм
-
-                                </td>
-
-                                <td>
-
-                                    <?php if (
-                                        $item[
-                                            'thickness'
-                                        ] !== null
-                                    ): ?>
-
-                                        <?= e(
-                                            (string)
-                                            $item[
-                                                'thickness'
-                                            ]
-                                        ) ?>
-
-                                        мм
-
-                                    <?php else: ?>
-
-                                        —
-
-                                    <?php endif; ?>
-
-                                </td>
-
-                                <td>
-                                    <?= e(
-                                        $item[
-                                            'stage_name'
-                                        ]
-                                    ) ?>
-                                </td>
-
-                                <td>
-
-                                    <select
-                                        class="result-select"
-                                        name="results[<?= (int) $item['batch_item_id'] ?>]"
-                                    >
-
-                                        <option value="completed">
-                                            ✅ Готово
-                                        </option>
-
-                                        <option value="rejected">
-                                            ❌ Брак
-                                        </option>
-
-                                    </select>
-
-                                </td>
-
-                            </tr>
-
-                        <?php endforeach; ?>
-
-                        </tbody>
-
-                    </table>
-
-                </div>
-
-
-                <div class="batch-footer">
-
-                    <div class="batch-warning">
-
-                        Исполнитель:
-                        <strong>
-                            <?= e(
-                                $batch[
-                                    'assigned_employee_name'
-                                ]
-                                ??
-                                'Не назначен'
-                            ) ?>
-                        </strong>
-
-                        <br>
-
-                        После подтверждения
-                        производственные операции
-                        будут записаны на этого исполнителя.
-
-                    </div>
-
-
-                    <button
-                        type="submit"
-                        class="finish-button"
-                        onclick="return confirm('Завершить всю партию с указанными результатами?');"
-                    >
-                        Завершить партию
-                    </button>
-
-                </div>
+                <button
+                    type="submit"
+                    class="button button-primary"
+                    onclick="return confirm('Завершити партію та передати всі незабраковані стекла на наступний етап?');"
+                >
+                    ✅ Завершити партію
+                </button>
 
             </form>
 
-        <?php else: ?>
-
-            <div class="batch-completed">
-
-                <strong>
-                    Статус партии:
-                </strong>
-
-                <?= e(
-                    batchStatusLabel(
-                        $batch['status']
-                    )
-                ) ?>
-
-                <?php if (
-                    $batch['completed_at']
-                ): ?>
-
-                    <br>
-
-                    <small>
-                        Завершена:
-                        <?= e(
-                            $batch[
-                                'completed_at'
-                            ]
-                        ) ?>
-                    </small>
-
-                <?php endif; ?>
-
-            </div>
-
         <?php endif; ?>
+
+
+        <p style="margin-top:20px;">
+
+            <a
+                href="/work.php"
+                class="button-secondary"
+            >
+                ← Повернутися до роботи
+            </a>
+
+        </p>
 
     </section>
 

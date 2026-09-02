@@ -3,12 +3,24 @@
 require __DIR__ . '/../src/auth.php';
 require __DIR__ . '/../src/notifications.php';
 require __DIR__ . '/../src/telegram.php';
+require __DIR__ . '/../src/permissions.php';
 
 $user = require_user();
 
 /*
 |--------------------------------------------------------------------------
-| Helpers
+| Доступ
+|--------------------------------------------------------------------------
+*/
+
+require_permission(
+    'glass.reject',
+    $user
+);
+
+/*
+|--------------------------------------------------------------------------
+| Допоміжні функції
 |--------------------------------------------------------------------------
 */
 
@@ -21,7 +33,7 @@ function e(?string $value): string
     );
 }
 
-function audit(
+function writeAudit(
     PDO $db,
     int $userId,
     string $action,
@@ -84,43 +96,32 @@ function audit(
                 : null,
 
         ':ip_address' =>
-            $_SERVER['REMOTE_ADDR'] ?? null,
+            $_SERVER['REMOTE_ADDR']
+            ?? null,
 
         ':user_agent' =>
-            $_SERVER['HTTP_USER_AGENT'] ?? null,
+            $_SERVER['HTTP_USER_AGENT']
+            ?? null,
     ]);
 }
 
 /*
 |--------------------------------------------------------------------------
-| Доступ только сотруднику / начальнику участка
+| Виробнича дільниця користувача
 |--------------------------------------------------------------------------
 */
 
-if (!in_array(
-    $user['role'],
-    [
-        'employee',
-        'section_manager',
-    ],
-    true
-)) {
-    http_response_code(403);
-    exit('Доступ запрещён.');
-}
-
-/*
-|--------------------------------------------------------------------------
-| Участок пользователя
-|--------------------------------------------------------------------------
-*/
-
-$stageId = current_stage_id($user);
+$stageId =
+    current_stage_id(
+        $user
+    );
 
 if ($stageId === null) {
+
     http_response_code(403);
+
     exit(
-        'У пользователя не назначен производственный участок.'
+        'Користувачу не призначено виробничу дільницю.'
     );
 }
 
@@ -130,10 +131,16 @@ if ($stageId === null) {
 |--------------------------------------------------------------------------
 */
 
-if (empty($_SESSION['csrf_reject'])) {
-    $_SESSION['csrf_reject'] = bin2hex(
-        random_bytes(32)
-    );
+if (
+    empty(
+        $_SESSION['csrf_reject']
+    )
+) {
+
+    $_SESSION['csrf_reject'] =
+        bin2hex(
+            random_bytes(32)
+        );
 }
 
 $csrfToken =
@@ -141,42 +148,47 @@ $csrfToken =
 
 /*
 |--------------------------------------------------------------------------
-| Переменные формы
+| Дані форми
 |--------------------------------------------------------------------------
 */
 
-$code = trim(
-    $_POST['code']
-    ?? $_GET['code']
-    ?? ''
-);
+$code =
+    trim(
+        $_POST['code']
+        ?? $_GET['code']
+        ?? ''
+    );
 
 $reason =
     trim(
-        $_POST['reason'] ?? ''
+        $_POST['reason']
+        ?? ''
     );
 
 $comment =
     trim(
-        $_POST['comment'] ?? ''
+        $_POST['comment']
+        ?? ''
     );
 
-$error = '';
+$messageType = '';
+$messageTitle = '';
+$messageText = '';
 
 /*
 |--------------------------------------------------------------------------
-| Причины брака
+| Причини браку
 |--------------------------------------------------------------------------
 */
 
 $rejectionReasons = [
-    'Трещина',
+    'Тріщина',
     'Скол',
-    'Царапина',
-    'Размер не соответствует',
-    'Повреждение поверхности',
-    'Бой стекла',
-    'Другая причина',
+    'Подряпина',
+    'Невідповідність розміру',
+    'Пошкодження поверхні',
+    'Бій скла',
+    'Інша причина',
 ];
 
 /*
@@ -185,28 +197,53 @@ $rejectionReasons = [
 |--------------------------------------------------------------------------
 */
 
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+if (
+    $_SERVER['REQUEST_METHOD']
+    === 'POST'
+) {
 
     /*
-     * CSRF
+     * Повторна серверна перевірка права.
      */
 
-    if (!hash_equals(
-        $csrfToken,
-        $_POST['csrf_token'] ?? ''
-    )) {
+    require_permission(
+        'glass.reject',
+        $user
+    );
+
+    /*
+     * CSRF.
+     */
+
+    if (
+        !hash_equals(
+            $csrfToken,
+            $_POST['csrf_token']
+            ?? ''
+        )
+    ) {
 
         http_response_code(403);
 
         exit(
-            'Ошибка проверки безопасности.'
+            'Помилка перевірки безпеки.'
         );
     }
 
+    /*
+     * Валідація.
+     */
+
     if ($code === '') {
 
-        $error =
-            'QR-код стекла не указан.';
+        $messageType =
+            'error';
+
+        $messageTitle =
+            'QR-код не вказано';
+
+        $messageText =
+            'Відскануйте або введіть QR-код скла.';
 
     } elseif (
         !in_array(
@@ -216,56 +253,62 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         )
     ) {
 
-        $error =
-            'Выберите причину брака.';
+        $messageType =
+            'error';
+
+        $messageTitle =
+            'Причину браку не вказано';
+
+        $messageText =
+            'Оберіть причину браку зі списку.';
 
     } else {
 
         /*
-         * Ищем стекло.
+         * --------------------------------------------------------------
+         * Пошук скла.
+         * --------------------------------------------------------------
          */
 
-        $stmt = $db->prepare("
-            SELECT
-                g.id,
-                g.code,
-                g.order_id,
-                g.order_number,
-                g.glass_type,
-                g.thickness,
-                g.width,
-                g.height,
-                g.quantity,
-                g.status,
-                g.current_step_id,
-                g.current_location,
-                g.route_id,
+        $stmt =
+            $db->prepare("
+                SELECT
+                    g.id,
+                    g.code,
+                    g.order_id,
+                    g.order_number,
+                    g.status,
+                    g.current_step_id,
+                    g.current_location,
+                    g.route_id,
 
-                o.status AS order_status,
-                o.customer_name,
-                o.priority,
-                o.planned_date,
+                    o.status AS order_status,
+                    o.priority,
 
-                rs.name AS stage_name,
+                    rs.name AS stage_name,
 
-                ps.id AS production_stage_id,
-                ps.name AS production_stage_name
+                    ps.id AS production_stage_id,
+                    ps.name AS production_stage_name
 
-            FROM glasses g
+                FROM glasses g
 
-            JOIN route_steps rs
-                ON rs.id = g.current_step_id
+                JOIN route_steps rs
+                    ON rs.id =
+                        g.current_step_id
 
-            JOIN production_stages ps
-                ON ps.name = rs.name
+                JOIN production_stages ps
+                    ON ps.name =
+                        rs.name
 
-            LEFT JOIN orders o
-                ON o.id = g.order_id
+                LEFT JOIN orders o
+                    ON o.id =
+                        g.order_id
 
-            WHERE g.code = :code
+                WHERE g.code =
+                    :code
 
-            LIMIT 1
-        ");
+                LIMIT 1
+            ");
 
         $stmt->execute([
             ':code' =>
@@ -277,18 +320,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 PDO::FETCH_ASSOC
             );
 
+        /*
+         * Не знайдено.
+         */
+
         if (!$glass) {
 
-            $error =
-                'Стекло «'
-                . $code
-                . '» не найдено.';
+            $messageType =
+                'error';
 
-            audit(
+            $messageTitle =
+                'Скло не знайдено';
+
+            $messageText =
+                'QR-код «'
+                . e($code)
+                . '» відсутній у системі.';
+
+            writeAudit(
                 $db,
                 (int) $user['id'],
                 'reject_glass_not_found',
-                null,
+                'glass',
                 null,
                 null,
                 [
@@ -297,25 +350,42 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ]
             );
 
+        /*
+         * Інша дільниця.
+         */
+
         } elseif (
-            (int) $glass[
+            (int)
+            $glass[
                 'production_stage_id'
-            ] !== $stageId
+            ]
+            !==
+            $stageId
         ) {
 
-            $error =
-                'Стекло находится на участке «'
-                . $glass[
-                    'production_stage_name'
-                ]
-                . '», а ваш участок — «'
-                . (
-                    $user['stage_name']
-                    ?? 'не указан'
+            $messageType =
+                'error';
+
+            $messageTitle =
+                'Брак не оформлено';
+
+            $messageText =
+                'Скло знаходиться на дільниці «'
+                . e(
+                    $glass[
+                        'production_stage_name'
+                    ]
+                )
+                . '», а ваша дільниця — «'
+                . e(
+                    $user[
+                        'stage_name'
+                    ]
+                    ?? 'не вказана'
                 )
                 . '».';
 
-            audit(
+            writeAudit(
                 $db,
                 (int) $user['id'],
                 'reject_glass_denied',
@@ -328,18 +398,46 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     'code' =>
                         $glass['code'],
+
+                    'glass_stage_id' =>
+                        (int)
+                        $glass[
+                            'production_stage_id'
+                        ],
+
+                    'employee_stage_id' =>
+                        $stageId,
                 ]
             );
 
+        /*
+         * Замовлення не у виробництві.
+         */
+
         } elseif (
-            $glass['order_status']
-            !== 'in_production'
+            $glass[
+                'order_status'
+            ]
+            !==
+            'in_production'
         ) {
 
-            $error =
-                'Заказ сейчас не находится в производстве.';
+            $messageType =
+                'error';
 
-            audit(
+            $messageTitle =
+                'Брак не оформлено';
+
+            $messageText =
+                'Замовлення «'
+                . e(
+                    $glass[
+                        'order_number'
+                    ]
+                )
+                . '» зараз не перебуває у виробництві.';
+
+            writeAudit(
                 $db,
                 (int) $user['id'],
                 'reject_glass_denied',
@@ -350,10 +448,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'reason' =>
                         'order_not_in_production',
 
-                    'code' =>
-                        $glass['code'],
+                    'order_status' =>
+                        $glass[
+                            'order_status'
+                        ],
                 ]
             );
+
+        /*
+         * Некоректний статус.
+         */
 
         } elseif (
             !in_array(
@@ -366,12 +470,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             )
         ) {
 
-            $error =
-                'Стекло нельзя оформить как брак из текущего статуса «'
-                . $glass['status']
-                . '».';
+            $messageType =
+                'error';
 
-            audit(
+            $messageTitle =
+                'Брак не оформлено';
+
+            $messageText =
+                'Скло «'
+                . e(
+                    $glass['code']
+                )
+                . '» має статус «'
+                . e(
+                    $glass['status']
+                )
+                . '» і не може бути оформлене як брак.';
+
+            writeAudit(
                 $db,
                 (int) $user['id'],
                 'reject_glass_denied',
@@ -382,9 +498,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'reason' =>
                         'invalid_status',
 
-                    'code' =>
-                        $glass['code'],
-
                     'status' =>
                         $glass['status'],
                 ]
@@ -393,27 +506,37 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
 
             /*
-             * Проверяем активную партию.
+             * ----------------------------------------------------------
+             * Активна партія.
+             * ----------------------------------------------------------
              */
 
             $batchStmt =
                 $db->prepare("
                     SELECT
                         pb.id
+
                     FROM production_batch_items pbi
+
                     JOIN production_batches pb
-                        ON pb.id = pbi.batch_id
-                    WHERE pbi.glass_id = :glass_id
+                        ON pb.id =
+                            pbi.batch_id
+
+                    WHERE pbi.glass_id =
+                        :glass_id
+
                       AND pb.status IN (
                           'created',
                           'in_progress'
                       )
+
                     LIMIT 1
                 ");
 
             $batchStmt->execute([
                 ':glass_id' =>
-                    (int) $glass['id'],
+                    (int)
+                    $glass['id'],
             ]);
 
             $activeBatchId =
@@ -423,13 +546,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $activeBatchId !== false
             ) {
 
-                $error =
-                    'Стекло находится в активной партии №'
-                    . $activeBatchId
-                    . '. '
-                    . 'Брак по партии оформим через страницу партии.';
+                $messageType =
+                    'error';
 
-                audit(
+                $messageTitle =
+                    'Скло знаходиться у партії';
+
+                $messageText =
+                    'Скло «'
+                    . e(
+                        $glass['code']
+                    )
+                    . '» входить до активної партії №'
+                    . (int)
+                    $activeBatchId
+                    . '. '
+                    . 'Брак у партії потрібно оформлювати через сторінку партії.';
+
+                writeAudit(
                     $db,
                     (int) $user['id'],
                     'reject_glass_denied',
@@ -440,20 +574,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         'reason' =>
                             'active_batch',
 
-                        'code' =>
-                            $glass['code'],
-
                         'batch_id' =>
-                            (int) $activeBatchId,
+                            (int)
+                            $activeBatchId,
                     ]
                 );
 
             } else {
 
                 /*
-                 * ==========================================================
-                 * Транзакция
-                 * ==========================================================
+                 * ======================================================
+                 * Транзакція браку
+                 * ======================================================
                  */
 
                 try {
@@ -461,7 +593,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     $db->beginTransaction();
 
                     /*
-                     * Повторно читаем стекло.
+                     * Повторне читання скла.
                      */
 
                     $currentStmt =
@@ -472,23 +604,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 g.order_id,
                                 g.order_number,
                                 g.status,
-                                g.width,
-                                g.height,
-                                g.quantity,
                                 g.current_step_id,
                                 g.current_location,
-                                g.route_id,
 
                                 o.status AS order_status,
-                                o.priority,
 
-                                rs.name AS stage_name
+                                rs.name AS stage_name,
+
+                                ps.id AS production_stage_id
 
                             FROM glasses g
 
                             JOIN route_steps rs
                                 ON rs.id =
                                     g.current_step_id
+
+                            JOIN production_stages ps
+                                ON ps.name =
+                                    rs.name
 
                             JOIN orders o
                                 ON o.id =
@@ -502,7 +635,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     $currentStmt->execute([
                         ':id' =>
-                            (int) $glass['id'],
+                            (int)
+                            $glass['id'],
                     ]);
 
                     $currentGlass =
@@ -510,12 +644,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             PDO::FETCH_ASSOC
                         );
 
-                    if (!$currentGlass) {
+                    if (
+                        !$currentGlass
+                    ) {
 
                         throw new RuntimeException(
-                            'Стекло больше не найдено.'
+                            'Скло більше не знайдено.'
                         );
                     }
+
+                    /*
+                     * Повторна перевірка замовлення.
+                     */
 
                     if (
                         $currentGlass[
@@ -526,9 +666,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ) {
 
                         throw new RuntimeException(
-                            'Заказ больше не находится в производстве.'
+                            'Замовлення більше не перебуває у виробництві.'
                         );
                     }
+
+                    /*
+                     * Повторна перевірка статусу.
+                     */
 
                     if (
                         !in_array(
@@ -544,76 +688,58 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ) {
 
                         throw new RuntimeException(
-                            'Стекло уже обработано другим пользователем.'
+                            'Скло вже оброблене іншим користувачем.'
                         );
                     }
 
                     /*
-                     * Проверяем участок.
+                     * Повторна перевірка дільниці.
                      */
 
-                    $currentStageStmt =
-                        $db->prepare("
-                            SELECT
-                                ps.id,
-                                ps.name
-                            FROM route_steps rs
-                            JOIN production_stages ps
-                                ON ps.name = rs.name
-                            WHERE rs.id =
-                                :route_step_id
-                            LIMIT 1
-                        ");
-
-                    $currentStageStmt->execute([
-                        ':route_step_id' =>
-                            (int) $currentGlass[
-                                'current_step_id'
-                            ],
-                    ]);
-
-                    $currentStage =
-                        $currentStageStmt->fetch(
-                            PDO::FETCH_ASSOC
-                        );
-
                     if (
-                        !$currentStage
-                        ||
                         (int)
-                        $currentStage['id']
-                        !== $stageId
+                        $currentGlass[
+                            'production_stage_id'
+                        ]
+                        !==
+                        $stageId
                     ) {
 
                         throw new RuntimeException(
-                            'Стекло уже находится на другом участке.'
+                            'Скло вже знаходиться на іншій дільниці.'
                         );
                     }
 
                     /*
-                     * Проверяем активную партию ещё раз.
+                     * Повторна перевірка партії.
                      */
 
                     $activeBatchStmt =
                         $db->prepare("
                             SELECT
                                 pb.id
+
                             FROM production_batch_items pbi
+
                             JOIN production_batches pb
                                 ON pb.id =
                                     pbi.batch_id
+
                             WHERE pbi.glass_id =
                                 :glass_id
+
                               AND pb.status IN (
                                   'created',
                                   'in_progress'
                               )
+
                             LIMIT 1
                         ");
 
                     $activeBatchStmt->execute([
                         ':glass_id' =>
-                            (int) $currentGlass['id'],
+                            (int)
+                            $currentGlass['id'],
                     ]);
 
                     if (
@@ -623,12 +749,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ) {
 
                         throw new RuntimeException(
-                            'Стекло находится в активной партии.'
+                            'Скло знаходиться в активній партії.'
                         );
                     }
 
                     /*
-                     * Текст причины.
+                     * Причина + коментар.
                      */
 
                     $fullComment =
@@ -644,9 +770,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
 
                     /*
-                     * ------------------------------------------------------
+                     * --------------------------------------------------
                      * glass_operations
-                     * ------------------------------------------------------
+                     * --------------------------------------------------
                      */
 
                     $operationStmt =
@@ -677,13 +803,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     $operationStmt->execute([
                         ':glass_id' =>
-                            (int) $currentGlass['id'],
+                            (int)
+                            $currentGlass['id'],
 
                         ':employee_id' =>
-                            (int) $user['id'],
+                            (int)
+                            $user['id'],
 
                         ':route_step_id' =>
-                            (int) $currentGlass[
+                            (int)
+                            $currentGlass[
                                 'current_step_id'
                             ],
 
@@ -697,9 +826,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ]);
 
                     /*
-                     * ------------------------------------------------------
+                     * --------------------------------------------------
                      * glass_history
-                     * ------------------------------------------------------
+                     * --------------------------------------------------
                      */
 
                     $historyStmt =
@@ -726,13 +855,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
                     $historyStmt->execute([
                         ':glass_id' =>
-                            (int) $currentGlass['id'],
+                            (int)
+                            $currentGlass['id'],
 
                         ':employee_id' =>
-                            (int) $user['id'],
+                            (int)
+                            $user['id'],
 
                         ':old_status' =>
-                            $currentGlass['status'],
+                            $currentGlass[
+                                'status'
+                            ],
 
                         ':old_location' =>
                             $currentGlass[
@@ -750,13 +883,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     ]);
 
                     /*
-                     * ------------------------------------------------------
+                     * --------------------------------------------------
                      * glasses
-                     * ------------------------------------------------------
+                     * --------------------------------------------------
                      *
-                     * current_step_id НЕ меняем.
-                     * Это позволит позже вернуть стекло
-                     * на переработку с того же этапа.
+                     * current_step_id НЕ змінюємо.
+                     * Це знадобиться для майбутньої переробки.
                      */
 
                     $glassUpdate =
@@ -793,49 +925,54 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $fullComment,
 
                         ':id' =>
-                            (int) $currentGlass['id'],
+                            (int)
+                            $currentGlass['id'],
                     ]);
 
                     /*
-                     * ------------------------------------------------------
-                     * Внутренние уведомления руководству
-                     * ------------------------------------------------------
+                     * --------------------------------------------------
+                     * Внутрішні сповіщення керівництву
+                     * --------------------------------------------------
                      */
 
                     $notificationIds =
                         notifyManagement(
                             $db,
-
                             'glass_rejected',
-
-                            'Оформлен брак стекла',
-
-                            'Стекло '
-                            . $currentGlass['code']
-                            . ' по заказу '
-                            . $currentGlass['order_number']
-                            . ' оформлено как брак на участке «'
-                            . $currentGlass['stage_name']
+                            'Оформлено брак скла',
+                            'Скло '
+                            . $currentGlass[
+                                'code'
+                            ]
+                            . ' із замовлення '
+                            . $currentGlass[
+                                'order_number'
+                            ]
+                            . ' оформлено як брак на дільниці «'
+                            . $currentGlass[
+                                'stage_name'
+                            ]
                             . '». Причина: '
                             . $fullComment,
-
                             'glass',
-
-                            (int) $currentGlass['id']
+                            (int)
+                            $currentGlass['id']
                         );
 
                     /*
-                     * ------------------------------------------------------
+                     * --------------------------------------------------
                      * Audit
-                     * ------------------------------------------------------
+                     * --------------------------------------------------
                      */
 
-                    audit(
+                    writeAudit(
                         $db,
-                        (int) $user['id'],
+                        (int)
+                        $user['id'],
                         'reject_glass',
                         'glass',
-                        (int) $currentGlass['id'],
+                        (int)
+                        $currentGlass['id'],
                         [
                             'status' =>
                                 $currentGlass[
@@ -861,7 +998,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                                 $fullComment,
 
                             'employee_id' =>
-                                (int) $user['id'],
+                                (int)
+                                $user['id'],
 
                             'notification_ids' =>
                                 $notificationIds,
@@ -869,31 +1007,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     );
 
                     /*
-                     * ------------------------------------------------------
+                     * --------------------------------------------------
                      * COMMIT
-                     * ------------------------------------------------------
+                     * --------------------------------------------------
                      */
 
                     $db->commit();
 
                     /*
-                     * ------------------------------------------------------
-                     * Telegram — только после commit()
-                     * ------------------------------------------------------
+                     * --------------------------------------------------
+                     * Telegram після commit()
+                     * --------------------------------------------------
                      */
 
                     $telegramResult = [
-                        'success' => false,
-                        'sent' => false,
+                        'success' =>
+                            false,
+
+                        'sent' =>
+                            false,
                     ];
 
                     try {
 
                         $telegramMessage =
                             formatTelegramGlassRejected(
-                                $currentGlass['code'],
-                                $currentGlass['order_number'],
-                                $currentGlass['stage_name']
+                                $currentGlass[
+                                    'code'
+                                ],
+                                $currentGlass[
+                                    'order_number'
+                                ],
+                                $currentGlass[
+                                    'stage_name'
+                                ]
                             );
 
                         $telegramMessage .=
@@ -925,17 +1072,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     }
 
                     /*
-                     * Telegram audit.
+                     * Аудит Telegram.
                      */
 
                     try {
 
-                        audit(
+                        writeAudit(
                             $db,
-                            (int) $user['id'],
+                            (int)
+                            $user['id'],
                             'telegram_notification',
                             'glass',
-                            (int) $currentGlass['id'],
+                            (int)
+                            $currentGlass[
+                                'id'
+                            ],
                             null,
                             [
                                 'event' =>
@@ -962,22 +1113,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         );
 
                     } catch (
-                        Throwable $auditException
+                        Throwable
+                        $auditException
                     ) {
-                        // Аудит Telegram не должен ломать результат брака.
+                        // Аудит Telegram не впливає на оформлення браку.
                     }
 
                     /*
-                     * Результат.
+                     * --------------------------------------------------
+                     * Результат
+                     * --------------------------------------------------
                      */
 
-                    $scanType =
+                    $messageType =
                         'success';
 
-                    $scanTitle =
-                        '❌ БРАК ОФОРМЛЕН';
+                    $messageTitle =
+                        '❌ БРАК ОФОРМЛЕНО';
 
-                    $scanMessage =
+                    $messageText =
                         '<strong>'
                         . e(
                             $currentGlass[
@@ -985,7 +1139,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             ]
                         )
                         . '</strong><br>'
-                        . 'Участок: '
+                        . 'Дільниця: '
                         . e(
                             $currentGlass[
                                 'stage_name'
@@ -997,8 +1151,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             $fullComment
                         );
 
+                    if (
+                        $telegramResult[
+                            'sent'
+                        ]
+                        ?? false
+                    ) {
+
+                        $messageText .=
+                            '<br>'
+                            . '📲 Повідомлення надіслано в Telegram.';
+                    }
+
                 } catch (
-                    Throwable $exception
+                    Throwable
+                    $exception
                 ) {
 
                     if (
@@ -1007,25 +1174,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         $db->rollBack();
                     }
 
-                    $scanType =
+                    $messageType =
                         'error';
 
-                    $scanTitle =
-                        '❌ БРАК НЕ ОФОРМЛЕН';
+                    $messageTitle =
+                        '❌ БРАК НЕ ОФОРМЛЕНО';
 
-                    $scanMessage =
+                    $messageText =
                         e(
-                            $exception->getMessage()
+                            $exception
+                                ->getMessage()
                         );
 
                     try {
 
-                        audit(
+                        writeAudit(
                             $db,
-                            (int) $user['id'],
+                            (int)
+                            $user['id'],
                             'reject_glass_error',
                             'glass',
-                            isset($glass['id'])
+                            isset(
+                                $glass['id']
+                            )
                                 ? (int)
                                 $glass['id']
                                 : null,
@@ -1044,9 +1215,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         );
 
                     } catch (
-                        Throwable $auditException
+                        Throwable
+                        $auditException
                     ) {
-                        // Ничего не делаем.
+                        // Помилка аудиту не змінює результат.
                     }
                 }
             }
@@ -1054,15 +1226,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     }
 }
 
-/*
-|--------------------------------------------------------------------------
-| HTML
-|--------------------------------------------------------------------------
-*/
-
 ?>
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="uk">
 
 <head>
 
@@ -1074,8 +1240,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     >
 
     <title>
-        Брак — OPTIMA GLASS
+        Оформлення браку — OPTIMA GLASS
     </title>
+
+    <link
+        rel="stylesheet"
+        href="/assets/css/app.css"
+    >
 
     <style>
 
@@ -1083,95 +1254,95 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             box-sizing: border-box;
         }
 
-        body {
-            margin: 0;
-            padding: 30px 20px;
-            font-family: Arial, sans-serif;
-            background: #f4f6f8;
-        }
-
         .reject-page {
-            max-width: 650px;
+            max-width: 700px;
             margin: 0 auto;
+            padding: 30px 20px 60px;
         }
 
         .reject-card {
-            padding: 30px;
+            padding: 28px;
+            border: 1px solid #e5e7eb;
             border-radius: 16px;
             background: #fff;
-            border: 1px solid #e5e7eb;
         }
 
-        h1 {
+        .reject-card h1 {
             margin-top: 0;
+            margin-bottom: 8px;
         }
 
-        .subtitle {
+        .reject-meta {
             margin-bottom: 25px;
             color: #6b7280;
         }
 
         .message {
-            margin-bottom: 20px;
+            margin-bottom: 22px;
             padding: 18px;
             border-radius: 12px;
-            line-height: 1.5;
+            line-height: 1.55;
         }
 
         .message.success {
             background: #fee2e2;
-            color: #991b1b;
             border: 1px solid #fecaca;
+            color: #991b1b;
         }
 
         .message.error {
-            background: #fee2e2;
-            color: #991b1b;
-            border: 1px solid #fecaca;
+            background: #fef3c7;
+            border: 1px solid #fde68a;
+            color: #92400e;
+        }
+
+        .message-title {
+            margin-bottom: 8px;
+            font-size: 18px;
+            font-weight: 700;
         }
 
         .form-group {
             margin-bottom: 18px;
         }
 
-        label {
+        .form-group label {
             display: block;
             margin-bottom: 7px;
             font-weight: 700;
         }
 
-        input,
-        select,
-        textarea {
+        .form-control {
             width: 100%;
-            padding: 12px;
+            padding: 12px 13px;
             border: 1px solid #d1d5db;
             border-radius: 9px;
             font: inherit;
         }
 
-        textarea {
-            min-height: 100px;
+        textarea.form-control {
+            min-height: 110px;
             resize: vertical;
         }
 
-        .buttons {
+        .actions {
             display: flex;
             gap: 10px;
-            margin-top: 20px;
+            flex-wrap: wrap;
+            margin-top: 22px;
         }
 
         .button {
             display: inline-flex;
-            align-items: center;
             justify-content: center;
+            align-items: center;
             min-height: 46px;
             padding: 0 18px;
             border: 0;
             border-radius: 9px;
             text-decoration: none;
-            cursor: pointer;
             font-weight: 700;
+            cursor: pointer;
         }
 
         .button-danger {
@@ -1182,6 +1353,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         .button-secondary {
             background: #f3f4f6;
             color: #111827;
+        }
+
+        @media (
+            max-width: 600px
+        ) {
+
+            .actions {
+                flex-direction: column;
+            }
+
+            .button {
+                width: 100%;
+            }
+
         }
 
     </style>
@@ -1197,68 +1382,79 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     <section class="reject-card">
 
         <h1>
-            Оформление брака
+            Оформлення браку
         </h1>
 
-        <div class="subtitle">
+        <div class="reject-meta">
 
-            <?= e($user['name']) ?>
+            <?= e(
+                $user['name']
+                ?? ''
+            ) ?>
 
             ·
 
             <?= e(
-                $user['stage_name']
-                ?? 'Участок не указан'
+                $user[
+                    'stage_name'
+                ]
+                ?? 'Дільницю не вказано'
             ) ?>
 
         </div>
 
 
-        <?php if ($scanType !== ''): ?>
+        <?php if (
+            $messageType !== ''
+        ): ?>
 
             <div
                 class="message <?= e(
-                    $scanType === 'success'
-                        ? 'success'
-                        : 'error'
+                    $messageType
                 ) ?>"
             >
 
-                <strong>
-                    <?= e($scanTitle) ?>
-                </strong>
+                <div class="message-title">
 
-                <br><br>
+                    <?= e(
+                        $messageTitle
+                    ) ?>
 
-                <?= $scanMessage ?>
+                </div>
+
+                <div>
+                    <?= $messageText ?>
+                </div>
 
             </div>
 
         <?php endif; ?>
 
 
-        <form
-            method="post"
-        >
+        <form method="post">
 
             <input
                 type="hidden"
                 name="csrf_token"
-                value="<?= e($csrfToken) ?>"
+                value="<?= e(
+                    $csrfToken
+                ) ?>"
             >
 
 
             <div class="form-group">
 
                 <label for="code">
-                    QR-код стекла
+                    QR-код скла
                 </label>
 
                 <input
+                    type="text"
                     id="code"
                     name="code"
+                    class="form-control"
                     value="<?= e($code) ?>"
-                    placeholder="Отсканируйте QR"
+                    placeholder="Відскануйте QR-код"
                     autocomplete="off"
                     autofocus
                     required
@@ -1270,17 +1466,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="form-group">
 
                 <label for="reason">
-                    Причина брака
+                    Причина браку
                 </label>
 
                 <select
                     id="reason"
                     name="reason"
+                    class="form-control"
                     required
                 >
 
                     <option value="">
-                        Выберите причину
+                        Оберіть причину
                     </option>
 
                     <?php foreach (
@@ -1292,9 +1489,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                             value="<?= e(
                                 $rejectionReason
                             ) ?>"
-                            <?= $reason === $rejectionReason
-                                ? 'selected'
-                                : '' ?>
+                            <?= $reason ===
+                                $rejectionReason
+                                    ? 'selected'
+                                    : '' ?>
                         >
                             <?= e(
                                 $rejectionReason
@@ -1311,32 +1509,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             <div class="form-group">
 
                 <label for="comment">
-                    Дополнительный комментарий
+                    Додатковий коментар
                 </label>
 
                 <textarea
                     id="comment"
                     name="comment"
-                    placeholder="Например: скол 20 мм по кромке"
+                    class="form-control"
+                    placeholder="Наприклад: скол 20 мм по кромці"
                 ><?= e($comment) ?></textarea>
 
             </div>
 
 
-            <div class="buttons">
+            <div class="actions">
 
                 <button
                     type="submit"
                     class="button button-danger"
                 >
-                    ❌ Оформить брак
+                    ❌ Оформити брак
                 </button>
 
                 <a
                     href="/work.php"
                     class="button button-secondary"
                 >
-                    Отмена
+                    Повернутися до роботи
                 </a>
 
             </div>
@@ -1354,13 +1553,13 @@ document.addEventListener(
     'DOMContentLoaded',
     function () {
 
-        const input =
+        const codeInput =
             document.getElementById(
                 'code'
             );
 
-        if (input) {
-            input.focus();
+        if (codeInput) {
+            codeInput.focus();
         }
 
     }

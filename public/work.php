@@ -31,78 +31,20 @@ function priorityLabel(int $priority): string
     };
 }
 
-/*
-|--------------------------------------------------------------------------
-| Доступ
-|--------------------------------------------------------------------------
-|
-| Робочий екран вимагає право production.view.
-| QR-операція додатково перевіряє glass.scan.
-|
-|--------------------------------------------------------------------------
-*/
-
-if (!can('production.view', $user)) {
-    http_response_code(403);
-
-    exit(
-        'Доступ заборонено. Немає дозволу на перегляд виробництва.'
-    );
+function stageLabel(string $name): string
+{
+    return match ($name) {
+        'Порезка' => 'Порізка',
+        'Обработка' => 'Обробка',
+        'Закалка' => 'Гартування',
+        'Контроль качества' => 'Контроль якості',
+        'Упаковка' => 'Пакування',
+        'Отгрузка' => 'Відвантаження',
+        'Емалит' => 'Емаліт',
+        'Триплекс' => 'Триплекс',
+        default => $name,
+    };
 }
-
-$canScan = can(
-    'glass.scan',
-    $user
-);
-
-$canReject = can(
-    'glass.reject',
-    $user
-);
-
-$stageId = current_stage_id($user);
-
-if ($stageId === null) {
-    http_response_code(403);
-
-    exit(
-        'Користувачу не призначено виробничу дільницю.'
-    );
-}
-
-/*
-|--------------------------------------------------------------------------
-| CSRF
-|--------------------------------------------------------------------------
-*/
-
-if (empty($_SESSION['csrf_work'])) {
-
-    $_SESSION['csrf_work'] =
-        bin2hex(
-            random_bytes(32)
-        );
-}
-
-$csrfToken =
-    $_SESSION['csrf_work'];
-
-/*
-|--------------------------------------------------------------------------
-| Результат операції
-|--------------------------------------------------------------------------
-*/
-
-$scanType = '';
-$scanTitle = '';
-$scanMessage = '';
-$scannedCode = '';
-
-/*
-|--------------------------------------------------------------------------
-| Audit
-|--------------------------------------------------------------------------
-*/
 
 function writeAudit(
     PDO $db,
@@ -138,17 +80,10 @@ function writeAudit(
     ");
 
     $stmt->execute([
-        ':user_id' =>
-            $userId,
-
-        ':action' =>
-            $action,
-
-        ':entity_type' =>
-            $entityType,
-
-        ':entity_id' =>
-            $entityId,
+        ':user_id' => $userId,
+        ':action' => $action,
+        ':entity_type' => $entityType,
+        ':entity_id' => $entityId,
 
         ':old_value' =>
             $oldValue !== null
@@ -178,59 +113,262 @@ function writeAudit(
 
 /*
 |--------------------------------------------------------------------------
-| QR-сканування
+| Доступ
+|--------------------------------------------------------------------------
+*/
+
+require_permission(
+    'production.view',
+    $user
+);
+
+$canScan =
+    can(
+        'glass.scan',
+        $user
+    );
+
+$canReject =
+    can(
+        'glass.reject',
+        $user
+    );
+
+$canCompleteOrderStage =
+    can(
+        'production.complete_order_stage',
+        $user
+    );
+
+$stageId =
+    current_stage_id(
+        $user
+    );
+
+if ($stageId === null) {
+
+    http_response_code(403);
+
+    exit(
+        'Користувачу не призначено виробничу дільницю.'
+    );
+}
+
+/*
+|--------------------------------------------------------------------------
+| Поточна дільниця
+|--------------------------------------------------------------------------
+*/
+
+$stageStmt =
+    $db->prepare("
+        SELECT
+            id,
+            name,
+            execution_mode
+        FROM production_stages
+        WHERE id = :id
+          AND active = 1
+        LIMIT 1
+    ");
+
+$stageStmt->execute([
+    ':id' => $stageId,
+]);
+
+$currentStage =
+    $stageStmt->fetch(
+        PDO::FETCH_ASSOC
+    );
+
+if (!$currentStage) {
+
+    http_response_code(403);
+
+    exit(
+        'Виробничу дільницю не знайдено.'
+    );
+}
+
+/*
+|--------------------------------------------------------------------------
+| CSRF
 |--------------------------------------------------------------------------
 */
 
 if (
-    $_SERVER['REQUEST_METHOD'] === 'POST'
-    &&
-    ($_POST['action'] ?? '') === 'scan_glass'
+    empty(
+        $_SESSION['csrf_work']
+    )
 ) {
 
-    /*
-     * Перевірка права.
-     */
-
-    if (!$canScan) {
-
-        http_response_code(403);
-
-        exit(
-            'У вас немає дозволу на QR-сканування.'
+    $_SESSION['csrf_work'] =
+        bin2hex(
+            random_bytes(32)
         );
-    }
+}
+
+$csrfToken =
+    $_SESSION['csrf_work'];
+
+/*
+|--------------------------------------------------------------------------
+| Результат операції
+|--------------------------------------------------------------------------
+*/
+
+$scanType = '';
+$scanTitle = '';
+$scanMessage = '';
+$scannedCode = '';
+
+$orderQrPreview = null;
+$orderQrGlasses = [];
+$orderQrArea = 0.0;
+$orderQrBatchCount = 0;
+$orderQrRejectedCount = 0;
+
+/*
+|--------------------------------------------------------------------------
+| Завантаження скла замовлення на поточній дільниці
+|--------------------------------------------------------------------------
+*/
+
+function loadOrderStageGlasses(
+    PDO $db,
+    int $orderId,
+    int $stageId
+): array {
+
+    $stmt =
+        $db->prepare("
+            SELECT
+                g.id,
+                g.code,
+                g.order_id,
+                g.order_number,
+                g.status,
+                g.width,
+                g.height,
+                g.quantity,
+                g.route_id,
+                g.current_step_id,
+                g.current_location,
+
+                rs.step_number,
+                rs.name AS stage_name,
+
+                CASE
+                    WHEN EXISTS (
+                        SELECT 1
+                        FROM production_batch_items pbi
+                        JOIN production_batches pb
+                            ON pb.id = pbi.batch_id
+                        WHERE pbi.glass_id = g.id
+                          AND pb.status IN (
+                              'created',
+                              'in_progress'
+                          )
+                    )
+                    THEN 1
+                    ELSE 0
+                END AS in_active_batch
+
+            FROM glasses g
+
+            JOIN route_steps rs
+                ON rs.id =
+                    g.current_step_id
+
+            JOIN production_stages ps
+                ON ps.name =
+                    rs.name
+
+            WHERE g.order_id =
+                :order_id
+
+              AND ps.id =
+                :stage_id
+
+            ORDER BY g.id
+        ");
+
+    $stmt->execute([
+        ':order_id' =>
+            $orderId,
+
+        ':stage_id' =>
+            $stageId,
+    ]);
+
+    return $stmt->fetchAll(
+        PDO::FETCH_ASSOC
+    );
+}
+
+/*
+|--------------------------------------------------------------------------
+| POST
+|--------------------------------------------------------------------------
+*/
+
+if (
+    $_SERVER['REQUEST_METHOD']
+    === 'POST'
+) {
 
     /*
      * CSRF.
      */
 
-    if (!hash_equals(
-        $csrfToken,
-        $_POST['csrf_token'] ?? ''
-    )) {
+    if (
+        !hash_equals(
+            $csrfToken,
+            $_POST['csrf_token']
+            ?? ''
+        )
+    ) {
 
-        $scanType =
-            'error';
+        http_response_code(403);
 
-        $scanTitle =
-            'Помилка безпеки';
+        exit(
+            'Помилка перевірки безпеки.'
+        );
+    }
 
-        $scanMessage =
-            'Перевірку запиту не пройдено.';
+    $action =
+        $_POST['action']
+        ?? '';
 
-    } else {
+    /*
+    |--------------------------------------------------------------------------
+    | Сканування QR
+    |--------------------------------------------------------------------------
+    */
+
+    if (
+        $action ===
+        'scan_glass'
+    ) {
+
+        require_permission(
+            'glass.scan',
+            $user
+        );
 
         $code =
             trim(
-                $_POST['code'] ?? ''
+                $_POST['code']
+                ?? ''
             );
 
         $scannedCode =
             $code;
 
         /*
+         * ---------------------------------------------------------------
          * Порожній код.
+         * ---------------------------------------------------------------
          */
 
         if ($code === '') {
@@ -242,7 +380,7 @@ if (
                 'QR-код не вказано';
 
             $scanMessage =
-                'Відскануйте QR-код скла.';
+                'Відскануйте QR-код скла або замовлення.';
 
             writeAudit(
                 $db,
@@ -256,13 +394,222 @@ if (
                 ]
             );
 
-        } else {
+        /*
+         * ---------------------------------------------------------------
+         * Службовий QR замовлення.
+         * ---------------------------------------------------------------
+         */
 
-            /*
-             * ----------------------------------------------------------
-             * Пошук скла
-             * ----------------------------------------------------------
-             */
+        } elseif (
+            str_starts_with(
+                strtoupper($code),
+                'ORDER-'
+            )
+        ) {
+
+            require_permission(
+                'production.complete_order_stage',
+                $user
+            );
+
+            $orderNumber =
+                trim(
+                    substr(
+                        $code,
+                        6
+                    )
+                );
+
+            if (
+                $orderNumber === ''
+            ) {
+
+                $scanType =
+                    'error';
+
+                $scanTitle =
+                    'Некоректний QR замовлення';
+
+                $scanMessage =
+                    'Не вдалося визначити номер замовлення.';
+
+            } else {
+
+                $orderStmt =
+                    $db->prepare("
+                        SELECT
+                            id,
+                            order_number,
+                            customer_name,
+                            priority,
+                            status
+                        FROM orders
+                        WHERE order_number =
+                            :order_number
+                        LIMIT 1
+                    ");
+
+                $orderStmt->execute([
+                    ':order_number' =>
+                        $orderNumber,
+                ]);
+
+                $orderQrPreview =
+                    $orderStmt->fetch(
+                        PDO::FETCH_ASSOC
+                    );
+
+                if (
+                    !$orderQrPreview
+                ) {
+
+                    $scanType =
+                        'error';
+
+                    $scanTitle =
+                        'Замовлення не знайдено';
+
+                    $scanMessage =
+                        'QR-код «'
+                        . e($code)
+                        . '» не відповідає жодному замовленню.';
+
+                    writeAudit(
+                        $db,
+                        (int) $user['id'],
+                        'scan_order_not_found',
+                        'order',
+                        null,
+                        null,
+                        [
+                            'code' =>
+                                $code,
+
+                            'order_number' =>
+                                $orderNumber,
+                        ]
+                    );
+
+                } elseif (
+                    $orderQrPreview[
+                        'status'
+                    ]
+                    !==
+                    'in_production'
+                ) {
+
+                    $scanType =
+                        'warning';
+
+                    $scanTitle =
+                        'Замовлення не у виробництві';
+
+                    $scanMessage =
+                        'Замовлення №'
+                        . e(
+                            $orderQrPreview[
+                                'order_number'
+                            ]
+                        )
+                        . ' зараз не перебуває у виробництві.';
+
+                } else {
+
+                    $allOrderGlasses =
+                        loadOrderStageGlasses(
+                            $db,
+                            (int)
+                            $orderQrPreview['id'],
+                            $stageId
+                        );
+
+                    foreach (
+                        $allOrderGlasses
+                        as $glass
+                    ) {
+
+                        if (
+                            (int)
+                            $glass[
+                                'in_active_batch'
+                            ]
+                            === 1
+                        ) {
+
+                            $orderQrBatchCount++;
+
+                            continue;
+                        }
+
+                        if (
+                            $glass['status']
+                            === 'rejected'
+                        ) {
+
+                            $orderQrRejectedCount++;
+
+                            continue;
+                        }
+
+                        if (
+                            !in_array(
+                                $glass[
+                                    'status'
+                                ],
+                                [
+                                    'waiting',
+                                    'in_progress',
+                                ],
+                                true
+                            )
+                        ) {
+
+                            continue;
+                        }
+
+                        $orderQrGlasses[] =
+                            $glass;
+
+                        $orderQrArea +=
+                            (
+                                (int)
+                                $glass['width']
+                                *
+                                (int)
+                                $glass['height']
+                                *
+                                max(
+                                    1,
+                                    (int)
+                                    $glass[
+                                        'quantity'
+                                    ]
+                                )
+                            )
+                            / 1000000;
+                    }
+
+                    $scanType =
+                        'order_preview';
+
+                    $scanTitle =
+                        'Замовлення №'
+                        . $orderQrPreview[
+                            'order_number'
+                        ];
+
+                    $scanMessage =
+                        'Перевірте дані перед масовим завершенням.';
+                }
+            }
+
+        /*
+         * ---------------------------------------------------------------
+         * Звичайний QR конкретного скла.
+         * ---------------------------------------------------------------
+         */
+
+        } else {
 
             $stmt =
                 $db->prepare("
@@ -271,13 +618,11 @@ if (
                         g.code,
                         g.order_id,
                         g.order_number,
-
                         g.glass_type,
                         g.thickness,
                         g.width,
                         g.height,
                         g.quantity,
-
                         g.status,
                         g.current_step_id,
                         g.current_location,
@@ -361,7 +706,9 @@ if (
 
             } elseif (
                 (int)
-                $glass['production_stage_id']
+                $glass[
+                    'production_stage_id'
+                ]
                 !==
                 $stageId
             ) {
@@ -375,16 +722,19 @@ if (
                 $scanMessage =
                     'Скло зараз знаходиться на дільниці «'
                     . e(
-                        $glass[
-                            'production_stage_name'
-                        ]
+                        stageLabel(
+                            $glass[
+                                'production_stage_name'
+                            ]
+                        )
                     )
                     . '», а ваша дільниця — «'
                     . e(
-                        $user[
-                            'stage_name'
-                        ]
-                        ?? 'не вказана'
+                        stageLabel(
+                            $currentStage[
+                                'name'
+                            ]
+                        )
                     )
                     . '».';
 
@@ -418,7 +768,9 @@ if (
              */
 
             } elseif (
-                $glass['order_status']
+                $glass[
+                    'order_status'
+                ]
                 !==
                 'in_production'
             ) {
@@ -430,31 +782,13 @@ if (
                     '⚠️ СКАНУВАННЯ НЕ ПРИЙНЯТО';
 
                 $scanMessage =
-                    'Замовлення «'
+                    'Замовлення №'
                     . e(
                         $glass[
                             'order_number'
                         ]
                     )
-                    . '» зараз не перебуває у виробництві.';
-
-                writeAudit(
-                    $db,
-                    (int) $user['id'],
-                    'scan_glass_denied',
-                    'glass',
-                    (int) $glass['id'],
-                    null,
-                    [
-                        'reason' =>
-                            'order_not_in_production',
-
-                        'order_status' =>
-                            $glass[
-                                'order_status'
-                            ],
-                    ]
-                );
+                    . ' не перебуває у виробництві.';
 
             /*
              * Некоректний статус.
@@ -462,7 +796,9 @@ if (
 
             } elseif (
                 !in_array(
-                    $glass['status'],
+                    $glass[
+                        'status'
+                    ],
                     [
                         'waiting',
                         'in_progress',
@@ -478,13 +814,7 @@ if (
                     '⚠️ СКАНУВАННЯ НЕ ПРИЙНЯТО';
 
                 $scanMessage =
-                    'Скло «'
-                    . e(
-                        $glass[
-                            'code'
-                        ]
-                    )
-                    . '» має статус «'
+                    'Скло має статус «'
                     . e(
                         $glass[
                             'status'
@@ -492,37 +822,16 @@ if (
                     )
                     . '» і не може бути оброблене.';
 
-                writeAudit(
-                    $db,
-                    (int) $user['id'],
-                    'scan_glass_denied',
-                    'glass',
-                    (int) $glass['id'],
-                    null,
-                    [
-                        'reason' =>
-                            'invalid_status',
-
-                        'status' =>
-                            $glass[
-                                'status'
-                            ],
-                    ]
-                );
-
             } else {
 
                 /*
-                 * ------------------------------------------------------
-                 * Перевіряємо активну партію.
-                 * ------------------------------------------------------
+                 * Активна партія.
                  */
 
                 $batchStmt =
                     $db->prepare("
                         SELECT
-                            pb.id,
-                            pb.status
+                            pb.id
 
                         FROM production_batch_items pbi
 
@@ -547,61 +856,34 @@ if (
                         $glass['id'],
                 ]);
 
-                $activeBatch =
-                    $batchStmt->fetch(
-                        PDO::FETCH_ASSOC
-                    );
+                $activeBatchId =
+                    $batchStmt
+                        ->fetchColumn();
 
-                if ($activeBatch) {
+                if (
+                    $activeBatchId !== false
+                ) {
 
                     $scanType =
                         'warning';
 
                     $scanTitle =
-                        '⚠️ СКЛО ЗНАХОДИТЬСЯ У ПАРТІЇ';
+                        '⚠️ СКЛО У ПАРТІЇ';
 
                     $scanMessage =
-                        'Скло «'
-                        . e(
-                            $glass['code']
-                        )
-                        . '» знаходиться в активній партії №'
+                        'Скло входить до активної партії №'
                         . (int)
-                        $activeBatch['id']
-                        . '. '
-                        . 'Завершіть його через сторінку партії.';
-
-                    writeAudit(
-                        $db,
-                        (int) $user['id'],
-                        'scan_glass_denied',
-                        'glass',
-                        (int) $glass['id'],
-                        null,
-                        [
-                            'reason' =>
-                                'active_batch',
-
-                            'batch_id' =>
-                                (int)
-                                $activeBatch['id'],
-                        ]
-                    );
+                        $activeBatchId
+                        . '. Завершіть його через сторінку партії.';
 
                 } else {
-
-                    /*
-                     * ==================================================
-                     * Єдина виробнича транзакція.
-                     * ==================================================
-                     */
 
                     try {
 
                         $db->beginTransaction();
 
                         /*
-                         * Повторне читання скла.
+                         * Повторне читання.
                          */
 
                         $currentStmt =
@@ -610,21 +892,18 @@ if (
                                     g.id,
                                     g.code,
                                     g.order_id,
+                                    g.order_number,
                                     g.status,
-
                                     g.width,
                                     g.height,
                                     g.quantity,
-
                                     g.current_step_id,
                                     g.current_location,
                                     g.route_id,
 
                                     o.status AS order_status,
-                                    o.order_number,
                                     o.priority,
 
-                                    rs.id AS route_step_id,
                                     rs.step_number,
                                     rs.name AS stage_name
 
@@ -662,10 +941,6 @@ if (
                             );
                         }
 
-                        /*
-                         * Повторна перевірка замовлення.
-                         */
-
                         if (
                             $currentGlass[
                                 'order_status'
@@ -678,10 +953,6 @@ if (
                                 'Замовлення більше не перебуває у виробництві.'
                             );
                         }
-
-                        /*
-                         * Повторна перевірка статусу.
-                         */
 
                         if (
                             !in_array(
@@ -697,106 +968,12 @@ if (
                         ) {
 
                             throw new RuntimeException(
-                                'Скло вже оброблене іншим користувачем.'
+                                'Скло вже оброблене.'
                             );
                         }
 
                         /*
-                         * Повторна перевірка дільниці.
-                         */
-
-                        $currentStageStmt =
-                            $db->prepare("
-                                SELECT
-                                    ps.id,
-                                    ps.name
-
-                                FROM route_steps rs
-
-                                JOIN production_stages ps
-                                    ON ps.name =
-                                        rs.name
-
-                                WHERE rs.id =
-                                    :route_step_id
-
-                                LIMIT 1
-                            ");
-
-                        $currentStageStmt->execute([
-                            ':route_step_id' =>
-                                (int)
-                                $currentGlass[
-                                    'current_step_id'
-                                ],
-                        ]);
-
-                        $currentStage =
-                            $currentStageStmt->fetch(
-                                PDO::FETCH_ASSOC
-                            );
-
-                        if (
-                            !$currentStage
-                            ||
-                            (int)
-                            $currentStage['id']
-                            !==
-                            $stageId
-                        ) {
-
-                            throw new RuntimeException(
-                                'Скло вже знаходиться на іншій дільниці.'
-                            );
-                        }
-
-                        /*
-                         * Повторна перевірка активної партії.
-                         */
-
-                        $activeBatchStmt =
-                            $db->prepare("
-                                SELECT
-                                    pb.id
-
-                                FROM production_batch_items pbi
-
-                                JOIN production_batches pb
-                                    ON pb.id =
-                                        pbi.batch_id
-
-                                WHERE pbi.glass_id =
-                                    :glass_id
-
-                                  AND pb.status IN (
-                                      'created',
-                                      'in_progress'
-                                  )
-
-                                LIMIT 1
-                            ");
-
-                        $activeBatchStmt->execute([
-                            ':glass_id' =>
-                                (int)
-                                $currentGlass['id'],
-                        ]);
-
-                        if (
-                            $activeBatchStmt
-                                ->fetchColumn()
-                            !== false
-                        ) {
-
-                            throw new RuntimeException(
-                                'Скло знаходиться в активній партії.'
-                            );
-                        }
-
-                        /*
-                         * ------------------------------------------------
-                         * Наступний етап маршруту.
-                         * ------------------------------------------------
+                         * Наступний етап.
                          */
 
                         $nextStmt =
@@ -805,15 +982,11 @@ if (
                                     id,
                                     step_number,
                                     name
-
                                 FROM route_steps
-
                                 WHERE route_id =
                                     :route_id
-
                                   AND step_number =
                                     :step_number
-
                                 LIMIT 1
                             ");
 
@@ -837,12 +1010,7 @@ if (
                                 PDO::FETCH_ASSOC
                             );
 
-                        $nextStageId =
-                            null;
-
-                        /*
-                         * Є наступний етап.
-                         */
+                        $nextStageId = null;
 
                         if ($nextStep) {
 
@@ -861,22 +1029,19 @@ if (
 
                             $nextStageStmt =
                                 $db->prepare("
-                                    SELECT
-                                        id
-
+                                    SELECT id
                                     FROM production_stages
-
                                     WHERE name =
                                         :name
-
                                       AND active = 1
-
                                     LIMIT 1
                                 ");
 
                             $nextStageStmt->execute([
                                 ':name' =>
-                                    $nextStep['name'],
+                                    $nextStep[
+                                        'name'
+                                    ],
                             ]);
 
                             $nextStageId =
@@ -884,23 +1049,20 @@ if (
                                     ->fetchColumn();
 
                             if (
-                                $nextStageId === false
+                                $nextStageId !== false
                             ) {
 
-                                throw new RuntimeException(
-                                    'Наступну виробничу дільницю не знайдено.'
-                                );
+                                $nextStageId =
+                                    (int)
+                                    $nextStageId;
+
+                            } else {
+
+                                $nextStageId =
+                                    null;
                             }
 
-                            $nextStageId =
-                                (int)
-                                $nextStageId;
-
                         } else {
-
-                            /*
-                             * Останній етап.
-                             */
 
                             $newStatus =
                                 'completed';
@@ -919,9 +1081,7 @@ if (
                         }
 
                         /*
-                         * ------------------------------------------------
-                         * 1. glass_operations
-                         * ------------------------------------------------
+                         * glass_operations.
                          */
 
                         $operationStmt =
@@ -946,7 +1106,7 @@ if (
                                     :to_stage,
                                     'completed',
                                     NULL,
-                                    'Операцію завершено QR-скануванням.'
+                                    :comment
                                 )
                             ");
 
@@ -972,12 +1132,13 @@ if (
 
                             ':to_stage' =>
                                 $toStage,
+
+                            ':comment' =>
+                                'Операцію завершено QR-скануванням.',
                         ]);
 
                         /*
-                         * ------------------------------------------------
-                         * 2. glass_history
-                         * ------------------------------------------------
+                         * glass_history.
                          */
 
                         $historyStmt =
@@ -1028,18 +1189,14 @@ if (
                                 $newLocation,
 
                             ':comment' =>
-                                $nextStep
-                                    ? 'QR: скло передано на наступну дільницю.'
-                                    : 'QR: маршрут скла повністю завершено.',
+                                'QR-сканування.',
                         ]);
 
                         /*
-                         * ------------------------------------------------
-                         * 3. glasses
-                         * ------------------------------------------------
+                         * glasses.
                          */
 
-                        $glassUpdate =
+                        $updateStmt =
                             $db->prepare("
                                 UPDATE glasses
                                 SET
@@ -1062,7 +1219,7 @@ if (
                                     :id
                             ");
 
-                        $glassUpdate->execute([
+                        $updateStmt->execute([
                             ':status' =>
                                 $newStatus,
 
@@ -1078,13 +1235,10 @@ if (
                         ]);
 
                         /*
-                         * ------------------------------------------------
-                         * 4. Внутрішні сповіщення
-                         * ------------------------------------------------
+                         * Сповіщення.
                          */
 
-                        $notificationIds =
-                            [];
+                        $notificationIds = [];
 
                         if (
                             $nextStageId !== null
@@ -1097,38 +1251,19 @@ if (
                                     'glass_moved',
                                     'Нове скло надійшло на дільницю',
                                     'Скло '
-                                    . $currentGlass[
-                                        'code'
-                                    ]
+                                    . $currentGlass['code']
                                     . ' із замовлення '
                                     . $currentGlass[
                                         'order_number'
                                     ]
                                     . ' надійшло на дільницю «'
                                     . $nextStep['name']
-                                    . '». '
-                                    . 'Попередня дільниця: «'
-                                    . $currentGlass[
-                                        'stage_name'
-                                    ]
-                                    . '». '
-                                    . 'Пріоритет: '
-                                    . (int)
-                                    $currentGlass[
-                                        'priority'
-                                    ]
-                                    . '.',
+                                    . '».',
                                     'glass',
                                     (int)
                                     $currentGlass['id']
                                 );
                         }
-
-                        /*
-                         * ------------------------------------------------
-                         * 5. Аудит сканування
-                         * ------------------------------------------------
-                         */
 
                         writeAudit(
                             $db,
@@ -1164,271 +1299,67 @@ if (
                                 'current_location' =>
                                     $newLocation,
 
-                                'employee_id' =>
-                                    (int)
-                                    $user['id'],
-
                                 'notification_ids' =>
                                     $notificationIds,
                             ]
                         );
 
-                        /*
-                         * ------------------------------------------------
-                         * 6. Перевірка завершення замовлення
-                         * ------------------------------------------------
-                         */
-
-                        $orderWasCompleted =
-                            false;
-
-                        if (
-                            $newStatus ===
-                            'completed'
-                        ) {
-
-                            $orderProgressStmt =
-                                $db->prepare("
-                                    SELECT
-                                        COUNT(*)
-                                            AS total_glasses,
-
-                                        SUM(
-                                            CASE
-                                                WHEN status =
-                                                    'completed'
-                                                THEN 1
-                                                ELSE 0
-                                            END
-                                        )
-                                            AS completed_glasses
-
-                                    FROM glasses
-
-                                    WHERE order_id =
-                                        :order_id
-                                ");
-
-                            $orderProgressStmt->execute([
-                                ':order_id' =>
-                                    (int)
-                                    $currentGlass[
-                                        'order_id'
-                                    ],
-                            ]);
-
-                            $orderProgress =
-                                $orderProgressStmt->fetch(
-                                    PDO::FETCH_ASSOC
-                                );
-
-                            if (
-                                (int) (
-                                    $orderProgress[
-                                        'total_glasses'
-                                    ]
-                                    ?? 0
-                                ) > 0
-
-                                &&
-
-                                (int) (
-                                    $orderProgress[
-                                        'completed_glasses'
-                                    ]
-                                    ?? 0
-                                )
-
-                                ===
-
-                                (int) (
-                                    $orderProgress[
-                                        'total_glasses'
-                                    ]
-                                    ?? 0
-                                )
-                            ) {
-
-                                $orderUpdate =
-                                    $db->prepare("
-                                        UPDATE orders
-                                        SET
-                                            status =
-                                                'completed',
-
-                                            production_completed_at =
-                                                CURRENT_TIMESTAMP,
-
-                                            updated_at =
-                                                CURRENT_TIMESTAMP
-
-                                        WHERE id =
-                                            :id
-
-                                          AND status <>
-                                            'completed'
-                                    ");
-
-                                $orderUpdate->execute([
-                                    ':id' =>
-                                        (int)
-                                        $currentGlass[
-                                            'order_id'
-                                        ],
-                                ]);
-
-                                $orderWasCompleted =
-                                    $orderUpdate->rowCount()
-                                    > 0;
-
-                                if (
-                                    $orderWasCompleted
-                                ) {
-
-                                    writeAudit(
-                                        $db,
-                                        (int)
-                                        $user['id'],
-                                        'order_completed',
-                                        'order',
-                                        (int)
-                                        $currentGlass[
-                                            'order_id'
-                                        ],
-                                        null,
-                                        [
-                                            'status' =>
-                                                'completed',
-
-                                            'total_glasses' =>
-                                                (int) (
-                                                    $orderProgress[
-                                                        'total_glasses'
-                                                    ]
-                                                    ?? 0
-                                                ),
-                                        ]
-                                    );
-                                }
-                            }
-                        }
-
-                        /*
-                         * ------------------------------------------------
-                         * COMMIT
-                         * ------------------------------------------------
-                         */
-
                         $db->commit();
 
                         /*
-                         * ------------------------------------------------
-                         * Telegram
-                         * ------------------------------------------------
-                         *
-                         * Надсилання відбувається після commit().
-                         * Telegram не може скасувати виробничу операцію.
-                         * ------------------------------------------------
+                         * Telegram після commit.
                          */
 
-                        $telegramResult = [
-                            'success' =>
-                                false,
-
-                            'sent' =>
-                                false,
-                        ];
-
-                        if (
-                            $nextStep
-                        ) {
+                        if ($nextStep) {
 
                             try {
 
-                                $width =
-                                    isset(
+                                $areaM2 =
+                                    (
+                                        (int)
                                         $currentGlass[
                                             'width'
                                         ]
-                                    )
-                                        ? (int)
-                                        $currentGlass[
-                                            'width'
-                                        ]
-                                        : null;
-
-                                $height =
-                                    isset(
+                                        *
+                                        (int)
                                         $currentGlass[
                                             'height'
                                         ]
-                                    )
-                                        ? (int)
-                                        $currentGlass[
-                                            'height'
-                                        ]
-                                        : null;
-
-                                $quantity =
-                                    isset(
-                                        $currentGlass[
-                                            'quantity'
-                                        ]
-                                    )
-                                        ? max(
+                                        *
+                                        max(
                                             1,
                                             (int)
                                             $currentGlass[
                                                 'quantity'
                                             ]
                                         )
-                                        : 1;
-
-                                $areaM2 =
-                                    null;
-
-                                if (
-                                    $width !== null
-                                    &&
-                                    $height !== null
-                                ) {
-
-                                    $areaM2 =
-                                        (
-                                            $width
-                                            *
-                                            $height
-                                            *
-                                            $quantity
-                                        )
-                                        / 1000000;
-                                }
+                                    )
+                                    / 1000000;
 
                                 $telegramMessage =
                                     formatTelegramGlassMoved(
                                         $currentGlass[
                                             'code'
                                         ],
-
                                         $currentGlass[
                                             'order_number'
                                         ],
-
                                         $currentGlass[
                                             'stage_name'
                                         ],
-
                                         $toStage,
-
                                         (int)
                                         $currentGlass[
                                             'priority'
                                         ],
-
-                                        $width,
-
-                                        $height,
-
+                                        (int)
+                                        $currentGlass[
+                                            'width'
+                                        ],
+                                        (int)
+                                        $currentGlass[
+                                            'height'
+                                        ],
                                         $areaM2
                                     );
 
@@ -1438,30 +1369,6 @@ if (
                                         $telegramMessage
                                     );
 
-                            } catch (
-                                Throwable
-                                $telegramException
-                            ) {
-
-                                $telegramResult = [
-                                    'success' =>
-                                        false,
-
-                                    'sent' =>
-                                        false,
-
-                                    'error' =>
-                                        $telegramException
-                                            ->getMessage(),
-                                ];
-                            }
-
-                            /*
-                             * Аудит доставки Telegram.
-                             */
-
-                            try {
-
                                 writeAudit(
                                     $db,
                                     (int)
@@ -1469,9 +1376,7 @@ if (
                                     'telegram_notification',
                                     'glass',
                                     (int)
-                                    $currentGlass[
-                                        'id'
-                                    ],
+                                    $currentGlass['id'],
                                     null,
                                     [
                                         'sent' =>
@@ -1496,15 +1401,11 @@ if (
 
                             } catch (
                                 Throwable
-                                $auditException
+                                $telegramException
                             ) {
-                                // Аудит Telegram не должен влиять на производство.
+                                // Telegram не впливає на виробництво.
                             }
                         }
-
-                        /*
-                         * Результат.
-                         */
 
                         $scanType =
                             'success';
@@ -1512,23 +1413,7 @@ if (
                         $scanTitle =
                             '✅ СКАНУВАННЯ ПРИЙНЯТО';
 
-                        if (
-                            $orderWasCompleted
-                        ) {
-
-                            $scanMessage =
-                                '<strong>'
-                                . e(
-                                    $currentGlass[
-                                        'code'
-                                    ]
-                                )
-                                . '</strong><br>'
-                                . 'Замовлення повністю завершено.';
-
-                        } elseif (
-                            $nextStep
-                        ) {
+                        if ($nextStep) {
 
                             $scanMessage =
                                 '<strong>'
@@ -1539,30 +1424,18 @@ if (
                                 )
                                 . '</strong><br>'
                                 . e(
-                                    $currentGlass[
-                                        'stage_name'
-                                    ]
+                                    stageLabel(
+                                        $currentGlass[
+                                            'stage_name'
+                                        ]
+                                    )
                                 )
                                 . ' → '
                                 . e(
-                                    $toStage
-                                )
-                                . '<br>'
-                                . 'Скло передано на наступну дільницю.';
-
-                            if (
-                                (
-                                    $telegramResult[
-                                        'sent'
-                                    ]
-                                    ?? false
-                                )
-                            ) {
-
-                                $scanMessage .=
-                                    '<br>'
-                                    . '📲 Повідомлення надіслано в Telegram.';
-                            }
+                                    stageLabel(
+                                        $toStage
+                                    )
+                                );
 
                         } else {
 
@@ -1574,7 +1447,7 @@ if (
                                     ]
                                 )
                                 . '</strong><br>'
-                                . 'Маршрут скла повністю завершено.';
+                                . 'Маршрут скла завершено.';
                         }
 
                     } catch (
@@ -1596,22 +1469,20 @@ if (
 
                         $scanMessage =
                             e(
-                                $exception->getMessage()
+                                $exception
+                                    ->getMessage()
                             );
 
                         try {
 
                             writeAudit(
                                 $db,
-                                (int) $user['id'],
+                                (int)
+                                $user['id'],
                                 'scan_glass_error',
                                 'glass',
-                                isset(
-                                    $glass['id']
-                                )
-                                    ? (int)
-                                    $glass['id']
-                                    : null,
+                                (int)
+                                $glass['id'],
                                 null,
                                 [
                                     'code' =>
@@ -1627,10 +1498,736 @@ if (
                             Throwable
                             $auditException
                         ) {
-                            // Помилка аудиту не змінює результат.
                         }
                     }
                 }
+            }
+        }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Масове завершення замовлення
+    |--------------------------------------------------------------------------
+    */
+
+    } elseif (
+        $action ===
+        'complete_order_stage'
+    ) {
+
+        require_permission(
+            'production.complete_order_stage',
+            $user
+        );
+
+        $orderId =
+            (int) (
+                $_POST[
+                    'order_id'
+                ]
+                ?? 0
+            );
+
+        if (
+            $orderId <= 0
+        ) {
+
+            $scanType =
+                'error';
+
+            $scanTitle =
+                'Замовлення не вказано';
+
+            $scanMessage =
+                'Не вдалося визначити замовлення.';
+
+        } else {
+
+            try {
+
+                $db->beginTransaction();
+
+                /*
+                 * Замовлення.
+                 */
+
+                $orderStmt =
+                    $db->prepare("
+                        SELECT
+                            id,
+                            order_number,
+                            customer_name,
+                            priority,
+                            status
+                        FROM orders
+                        WHERE id = :id
+                        LIMIT 1
+                    ");
+
+                $orderStmt->execute([
+                    ':id' =>
+                        $orderId,
+                ]);
+
+                $order =
+                    $orderStmt->fetch(
+                        PDO::FETCH_ASSOC
+                    );
+
+                if (!$order) {
+
+                    throw new RuntimeException(
+                        'Замовлення не знайдено.'
+                    );
+                }
+
+                if (
+                    $order['status']
+                    !==
+                    'in_production'
+                ) {
+
+                    throw new RuntimeException(
+                        'Замовлення не перебуває у виробництві.'
+                    );
+                }
+
+                /*
+                 * Повторно читаємо скло.
+                 */
+
+                $allGlasses =
+                    loadOrderStageGlasses(
+                        $db,
+                        $orderId,
+                        $stageId
+                    );
+
+                $completedIds = [];
+                $completedCodes = [];
+                $completedArea = 0.0;
+
+                foreach (
+                    $allGlasses
+                    as $glass
+                ) {
+
+                    /*
+                     * Скло в активній партії
+                     * не чіпаємо.
+                     */
+
+                    if (
+                        (int)
+                        $glass[
+                            'in_active_batch'
+                        ]
+                        === 1
+                    ) {
+                        continue;
+                    }
+
+                    /*
+                     * Брак / готове / інше
+                     * не чіпаємо.
+                     */
+
+                    if (
+                        !in_array(
+                            $glass['status'],
+                            [
+                                'waiting',
+                                'in_progress',
+                            ],
+                            true
+                        )
+                    ) {
+                        continue;
+                    }
+
+                    /*
+                     * Наступний етап.
+                     */
+
+                    $nextStmt =
+                        $db->prepare("
+                            SELECT
+                                id,
+                                step_number,
+                                name
+                            FROM route_steps
+                            WHERE route_id =
+                                :route_id
+                              AND step_number =
+                                :step_number
+                            LIMIT 1
+                        ");
+
+                    $nextStmt->execute([
+                        ':route_id' =>
+                            (int)
+                            $glass[
+                                'route_id'
+                            ],
+
+                        ':step_number' =>
+                            (int)
+                            $glass[
+                                'step_number'
+                            ]
+                            + 1,
+                    ]);
+
+                    $nextStep =
+                        $nextStmt->fetch(
+                            PDO::FETCH_ASSOC
+                        );
+
+                    if ($nextStep) {
+
+                        $newStatus =
+                            'waiting';
+
+                        $newStepId =
+                            (int)
+                            $nextStep['id'];
+
+                        $newLocation =
+                            $nextStep['name'];
+
+                        $toStage =
+                            $nextStep['name'];
+
+                    } else {
+
+                        $newStatus =
+                            'completed';
+
+                        $newStepId =
+                            (int)
+                            $glass[
+                                'current_step_id'
+                            ];
+
+                        $newLocation =
+                            'Готово';
+
+                        $toStage =
+                            null;
+                    }
+
+                    /*
+                     * operation.
+                     */
+
+                    $operationStmt =
+                        $db->prepare("
+                            INSERT INTO glass_operations (
+                                glass_id,
+                                employee_id,
+                                route_step_id,
+                                operation_type,
+                                from_stage,
+                                to_stage,
+                                result,
+                                batch_id,
+                                comment
+                            )
+                            VALUES (
+                                :glass_id,
+                                :employee_id,
+                                :route_step_id,
+                                'production',
+                                :from_stage,
+                                :to_stage,
+                                'completed',
+                                NULL,
+                                :comment
+                            )
+                        ");
+
+                    $operationStmt->execute([
+                        ':glass_id' =>
+                            (int)
+                            $glass['id'],
+
+                        ':employee_id' =>
+                            (int)
+                            $user['id'],
+
+                        ':route_step_id' =>
+                            (int)
+                            $glass[
+                                'current_step_id'
+                            ],
+
+                        ':from_stage' =>
+                            $glass[
+                                'stage_name'
+                            ],
+
+                        ':to_stage' =>
+                            $toStage,
+
+                        ':comment' =>
+                            'Масове завершення QR-кодом замовлення.',
+                    ]);
+
+                    /*
+                     * history.
+                     */
+
+                    $historyStmt =
+                        $db->prepare("
+                            INSERT INTO glass_history (
+                                glass_id,
+                                employee_id,
+                                old_status,
+                                new_status,
+                                old_location,
+                                new_location,
+                                comment
+                            )
+                            VALUES (
+                                :glass_id,
+                                :employee_id,
+                                :old_status,
+                                :new_status,
+                                :old_location,
+                                :new_location,
+                                :comment
+                            )
+                        ");
+
+                    $historyStmt->execute([
+                        ':glass_id' =>
+                            (int)
+                            $glass['id'],
+
+                        ':employee_id' =>
+                            (int)
+                            $user['id'],
+
+                        ':old_status' =>
+                            $glass['status'],
+
+                        ':new_status' =>
+                            $newStatus,
+
+                        ':old_location' =>
+                            $glass[
+                                'current_location'
+                            ],
+
+                        ':new_location' =>
+                            $newLocation,
+
+                        ':comment' =>
+                            'Замовлення №'
+                            . $order[
+                                'order_number'
+                            ]
+                            . ': масове завершення.',
+                    ]);
+
+                    /*
+                     * glasses.
+                     */
+
+                    $updateStmt =
+                        $db->prepare("
+                            UPDATE glasses
+                            SET
+                                status =
+                                    :status,
+
+                                current_step_id =
+                                    :current_step_id,
+
+                                current_location =
+                                    :current_location,
+
+                                employee_id =
+                                    NULL,
+
+                                updated_at =
+                                    CURRENT_TIMESTAMP
+
+                            WHERE id =
+                                :id
+                        ");
+
+                    $updateStmt->execute([
+                        ':status' =>
+                            $newStatus,
+
+                        ':current_step_id' =>
+                            $newStepId,
+
+                        ':current_location' =>
+                            $newLocation,
+
+                        ':id' =>
+                            (int)
+                            $glass['id'],
+                    ]);
+
+                    /*
+                     * Сповіщення наступній дільниці.
+                     */
+
+                    if ($nextStep) {
+
+                        $nextStageStmt =
+                            $db->prepare("
+                                SELECT id
+                                FROM production_stages
+                                WHERE name =
+                                    :name
+                                  AND active = 1
+                                LIMIT 1
+                            ");
+
+                        $nextStageStmt->execute([
+                            ':name' =>
+                                $nextStep[
+                                    'name'
+                                ],
+                        ]);
+
+                        $nextStageId =
+                            $nextStageStmt
+                                ->fetchColumn();
+
+                        if (
+                            $nextStageId !== false
+                        ) {
+
+                            notifyStage(
+                                $db,
+                                (int)
+                                $nextStageId,
+                                'glass_moved',
+                                'Нове скло надійшло на дільницю',
+                                'Скло '
+                                . $glass['code']
+                                . ' із замовлення '
+                                . $order[
+                                    'order_number'
+                                ]
+                                . ' надійшло на дільницю «'
+                                . $nextStep[
+                                    'name'
+                                ]
+                                . '».',
+                                'glass',
+                                (int)
+                                $glass['id']
+                            );
+                        }
+                    }
+
+                    $completedIds[] =
+                        (int)
+                        $glass['id'];
+
+                    $completedCodes[] =
+                        $glass['code'];
+
+                    $completedArea +=
+                        (
+                            (int)
+                            $glass['width']
+                            *
+                            (int)
+                            $glass['height']
+                            *
+                            max(
+                                1,
+                                (int)
+                                $glass[
+                                    'quantity'
+                                ]
+                            )
+                        )
+                        / 1000000;
+                }
+
+                if (
+                    !$completedIds
+                ) {
+
+                    throw new RuntimeException(
+                        'На цій дільниці немає доступного скла для завершення.'
+                    );
+                }
+
+                /*
+                 * Один загальний audit.
+                 */
+
+                writeAudit(
+                    $db,
+                    (int)
+                    $user['id'],
+                    'complete_order_stage',
+                    'order',
+                    $orderId,
+                    null,
+                    [
+                        'order_number' =>
+                            $order[
+                                'order_number'
+                            ],
+
+                        'stage_id' =>
+                            $stageId,
+
+                        'stage' =>
+                            $currentStage[
+                                'name'
+                            ],
+
+                        'completed_count' =>
+                            count(
+                                $completedIds
+                            ),
+
+                        'completed_area_m2' =>
+                            round(
+                                $completedArea,
+                                3
+                            ),
+
+                        'glass_ids' =>
+                            $completedIds,
+
+                        'glass_codes' =>
+                            $completedCodes,
+
+                        'completed_by_user_id' =>
+                            (int)
+                            $user['id'],
+                    ]
+                );
+
+                /*
+                 * Перевірка завершення замовлення.
+                 */
+
+                $progressStmt =
+                    $db->prepare("
+                        SELECT
+                            COUNT(*) AS total,
+
+                            SUM(
+                                CASE
+                                    WHEN status =
+                                        'completed'
+                                    THEN 1
+                                    ELSE 0
+                                END
+                            ) AS completed
+
+                        FROM glasses
+
+                        WHERE order_id =
+                            :order_id
+                    ");
+
+                $progressStmt->execute([
+                    ':order_id' =>
+                        $orderId,
+                ]);
+
+                $progress =
+                    $progressStmt->fetch(
+                        PDO::FETCH_ASSOC
+                    );
+
+                if (
+                    (int)
+                    ($progress['total'] ?? 0)
+                    > 0
+                    &&
+                    (int)
+                    ($progress['total'] ?? 0)
+                    ===
+                    (int)
+                    ($progress['completed'] ?? 0)
+                ) {
+
+                    $orderUpdate =
+                        $db->prepare("
+                            UPDATE orders
+                            SET
+                                status =
+                                    'completed',
+
+                                production_completed_at =
+                                    CURRENT_TIMESTAMP,
+
+                                updated_at =
+                                    CURRENT_TIMESTAMP
+
+                            WHERE id =
+                                :id
+                        ");
+
+                    $orderUpdate->execute([
+                        ':id' =>
+                            $orderId,
+                    ]);
+
+                    writeAudit(
+                        $db,
+                        (int)
+                        $user['id'],
+                        'order_completed',
+                        'order',
+                        $orderId,
+                        null,
+                        [
+                            'status' =>
+                                'completed',
+
+                            'total_glasses' =>
+                                (int)
+                                $progress['total'],
+                        ]
+                    );
+                }
+
+                $db->commit();
+
+                /*
+                 * Telegram.
+                 */
+
+                try {
+
+                    $telegramMessage =
+                        "✅ OPTIMA GLASS\n\n"
+                        . "Замовлення №"
+                        . $order[
+                            'order_number'
+                        ]
+                        . "\n"
+                        . "Працівник: "
+                        . (
+                            $user[
+                                'name'
+                            ]
+                            ?? ''
+                        )
+                        . "\n"
+                        . "Дільниця: "
+                        . stageLabel(
+                            $currentStage[
+                                'name'
+                            ]
+                        )
+                        . "\n"
+                        . "Завершено стекол: "
+                        . count(
+                            $completedIds
+                        )
+                        . "\n"
+                        . "Площа: "
+                        . number_format(
+                            $completedArea,
+                            2,
+                            '.',
+                            ''
+                        )
+                        . " м²";
+
+                    $telegramResult =
+                        sendTelegramToGroup(
+                            $db,
+                            $telegramMessage
+                        );
+
+                    writeAudit(
+                        $db,
+                        (int)
+                        $user['id'],
+                        'telegram_notification',
+                        'order',
+                        $orderId,
+                        null,
+                        [
+                            'event' =>
+                                'order_stage_completed',
+
+                            'sent' =>
+                                $telegramResult[
+                                    'sent'
+                                ]
+                                ?? false,
+
+                            'group' =>
+                                $telegramResult[
+                                    'group_title'
+                                ]
+                                ?? null,
+
+                            'error' =>
+                                $telegramResult[
+                                    'error'
+                                ]
+                                ?? null,
+                        ]
+                    );
+
+                } catch (
+                    Throwable
+                    $telegramException
+                ) {
+                }
+
+                $scanType =
+                    'success';
+
+                $scanTitle =
+                    '✅ ЗАМОВЛЕННЯ ОБРОБЛЕНО';
+
+                $scanMessage =
+                    'Завершено стекол: '
+                    . count(
+                        $completedIds
+                    )
+                    . '. Площа: '
+                    . number_format(
+                        $completedArea,
+                        2,
+                        ',',
+                        ' '
+                    )
+                    . ' м².';
+
+            } catch (
+                Throwable
+                $exception
+            ) {
+
+                if (
+                    $db->inTransaction()
+                ) {
+                    $db->rollBack();
+                }
+
+                $scanType =
+                    'error';
+
+                $scanTitle =
+                    '❌ ОПЕРАЦІЮ НЕ ВИКОНАНО';
+
+                $scanMessage =
+                    e(
+                        $exception
+                            ->getMessage()
+                    );
             }
         }
     }
@@ -1642,108 +2239,92 @@ if (
 |--------------------------------------------------------------------------
 */
 
-$queue = [];
+$queueStmt =
+    $db->prepare("
+        SELECT
+            g.id AS glass_id,
+            g.code,
+            g.order_number,
+            g.glass_type,
+            g.thickness,
+            g.width,
+            g.height,
+            g.quantity,
+            g.status,
 
-if (
-    can(
-        'production.view',
-        $user
-    )
-) {
+            o.id AS order_id,
+            o.customer_name,
+            o.priority,
+            o.planned_date
 
-    $queueStmt =
-        $db->prepare("
-            SELECT
-                g.id AS glass_id,
-                g.code,
-                g.order_number,
-                g.glass_type,
-                g.thickness,
-                g.width,
-                g.height,
-                g.quantity,
-                g.status,
+        FROM glasses g
 
-                o.id AS order_id,
-                o.customer_name,
-                o.priority,
-                o.planned_date
+        JOIN orders o
+            ON o.id =
+                g.order_id
 
-            FROM glasses g
+        JOIN route_steps rs
+            ON rs.id =
+                g.current_step_id
 
-            JOIN orders o
-                ON o.id =
-                    g.order_id
+        JOIN production_stages ps
+            ON ps.name =
+                rs.name
 
-            JOIN route_steps rs
-                ON rs.id =
-                    g.current_step_id
+        WHERE ps.id =
+            :stage_id
 
-            JOIN production_stages ps
-                ON ps.name =
-                    rs.name
+          AND o.status =
+            'in_production'
 
-            WHERE ps.id =
-                :stage_id
+          AND g.status =
+            'waiting'
 
-              AND o.status =
-                'in_production'
+          AND NOT EXISTS (
+              SELECT 1
+              FROM production_batch_items pbi
+              JOIN production_batches pb
+                  ON pb.id =
+                      pbi.batch_id
+              WHERE pbi.glass_id =
+                  g.id
+                AND pb.status IN (
+                    'created',
+                    'in_progress'
+                )
+          )
 
-              AND g.status =
-                'waiting'
+        ORDER BY
+            o.priority DESC,
 
-              AND NOT EXISTS (
-                  SELECT 1
+            CASE
+                WHEN o.planned_date IS NULL
+                THEN 1
+                ELSE 0
+            END,
 
-                  FROM production_batch_items pbi
+            o.planned_date ASC,
 
-                  JOIN production_batches pb
-                      ON pb.id =
-                          pbi.batch_id
+            g.created_at ASC,
 
-                  WHERE pbi.glass_id =
-                      g.id
+            g.id ASC
+    ");
 
-                    AND pb.status IN (
-                        'created',
-                        'in_progress'
-                    )
-              )
+$queueStmt->execute([
+    ':stage_id' =>
+        $stageId,
+]);
 
-            ORDER BY
-                o.priority DESC,
-
-                CASE
-                    WHEN o.planned_date IS NULL
-                    THEN 1
-                    ELSE 0
-                END,
-
-                o.planned_date ASC,
-
-                g.created_at ASC,
-
-                g.id ASC
-        ");
-
-    $queueStmt->execute([
-        ':stage_id' =>
-            $stageId,
-    ]);
-
-    $queue =
-        $queueStmt->fetchAll(
-            PDO::FETCH_ASSOC
-        );
-}
+$queue =
+    $queueStmt->fetchAll(
+        PDO::FETCH_ASSOC
+    );
 
 /*
 |--------------------------------------------------------------------------
-| Активні партії працівника
+| Мої активні партії
 |--------------------------------------------------------------------------
 */
-
-$batches = [];
 
 $batchStmt =
     $db->prepare("
@@ -1805,9 +2386,7 @@ $batchStmt =
 
         ORDER BY
             o.priority DESC,
-
             o.planned_date ASC,
-
             pb.created_at ASC
     ");
 
@@ -1829,15 +2408,24 @@ $batches =
 
 $queueArea = 0.0;
 
-foreach ($queue as $item) {
+foreach (
+    $queue
+    as $item
+) {
 
     $queueArea +=
         (
-            (int) $item['width']
+            (int)
+            $item['width']
             *
-            (int) $item['height']
+            (int)
+            $item['height']
             *
-            (int) $item['quantity']
+            max(
+                1,
+                (int)
+                $item['quantity']
+            )
         )
         / 1000000;
 }
@@ -1859,15 +2447,16 @@ foreach ($queue as $item) {
         Моя робота — OPTIMA GLASS
     </title>
 
-    <link
-        rel="stylesheet"
-        href="/assets/css/app.css"
-    >
-
     <style>
 
         * {
             box-sizing: border-box;
+        }
+
+        body {
+            margin: 0;
+            background: #f4f6f8;
+            font-family: Arial, sans-serif;
         }
 
         .work-page {
@@ -1884,92 +2473,22 @@ foreach ($queue as $item) {
             margin-bottom: 6px;
         }
 
-        .work-meta {
+        .muted {
             color: #6b7280;
         }
 
-        .scan-card,
-        .work-card {
-            margin-bottom: 25px;
-            padding: 25px;
+        .card {
+            margin-bottom: 22px;
+            padding: 24px;
             border: 1px solid #e5e7eb;
             border-radius: 14px;
             background: #fff;
         }
 
-        .scan-card h2,
-        .work-card h2 {
-            margin-top: 0;
-        }
-
         .scan-description {
-            margin-bottom: 20px;
             color: #6b7280;
+            margin-bottom: 18px;
             line-height: 1.5;
-        }
-
-        .scan-result {
-            margin-bottom: 20px;
-            padding: 20px;
-            border-radius: 12px;
-            text-align: center;
-        }
-
-        .scan-result.success {
-            background: #dcfce7;
-            color: #166534;
-            border: 1px solid #bbf7d0;
-        }
-
-        .scan-result.warning {
-            background: #fef3c7;
-            color: #92400e;
-            border: 1px solid #fde68a;
-        }
-
-        .scan-result.error {
-            background: #fee2e2;
-            color: #991b1b;
-            border: 1px solid #fecaca;
-        }
-
-        .scan-result-title {
-            margin-bottom: 8px;
-            font-size: 21px;
-            font-weight: 700;
-        }
-
-        .scan-result-message {
-            line-height: 1.55;
-        }
-
-        .scan-actions {
-            display: flex;
-            justify-content: center;
-            gap: 10px;
-            margin-top: 18px;
-            flex-wrap: wrap;
-        }
-
-        .action-button {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 44px;
-            padding: 0 16px;
-            border-radius: 9px;
-            text-decoration: none;
-            font-weight: 700;
-        }
-
-        .action-button-danger {
-            background: #b91c1c;
-            color: #fff;
-        }
-
-        .action-button-secondary {
-            background: #f3f4f6;
-            color: #111827;
         }
 
         .scan-form {
@@ -1980,66 +2499,112 @@ foreach ($queue as $item) {
         .scan-input {
             flex: 1;
             min-height: 56px;
-            padding: 0 16px;
+            padding: 0 15px;
             border: 1px solid #d1d5db;
-            border-radius: 10px;
-            font-size: 18px;
-            outline: none;
-        }
-
-        .scan-input:focus {
-            border-color: #111827;
-        }
-
-        .scan-submit {
-            min-width: 160px;
-            min-height: 56px;
-            border: 0;
-            border-radius: 10px;
-            font-size: 16px;
-            font-weight: 700;
-            cursor: pointer;
-        }
-
-        .scan-ready {
-            margin-top: 14px;
-            padding: 11px;
             border-radius: 9px;
-            background: #f9fafb;
-            color: #6b7280;
-            text-align: center;
-            font-size: 13px;
+            font-size: 18px;
         }
 
-        .work-summary {
+        .button {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            min-height: 44px;
+            padding: 0 16px;
+            border: 0;
+            border-radius: 8px;
+            background: #111827;
+            color: #fff;
+            text-decoration: none;
+            cursor: pointer;
+            font-weight: 700;
+        }
+
+        .button-secondary {
+            background: #f3f4f6;
+            color: #111827;
+        }
+
+        .button-danger {
+            background: #b91c1c;
+        }
+
+        .scan-result {
+            margin-bottom: 20px;
+            padding: 18px;
+            border-radius: 10px;
+        }
+
+        .scan-result.success {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .scan-result.error {
+            background: #fee2e2;
+            color: #991b1b;
+        }
+
+        .scan-result.warning {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .scan-result.order_preview {
+            background: #eff6ff;
+            color: #1e3a8a;
+        }
+
+        .scan-result-title {
+            font-size: 20px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .order-preview-grid {
             display: grid;
             grid-template-columns:
-                repeat(
-                    3,
-                    minmax(0, 1fr)
-                );
-
-            gap: 14px;
-            margin-bottom: 25px;
+                repeat(4, 1fr);
+            gap: 10px;
+            margin-top: 18px;
         }
 
-        .summary-card {
-            padding: 18px;
-            border: 1px solid #e5e7eb;
-            border-radius: 12px;
-            background: #fff;
+        .preview-box {
+            padding: 13px;
+            border-radius: 9px;
+            background: rgba(255,255,255,.65);
+        }
+
+        .preview-value {
+            display: block;
+            margin-top: 4px;
+            font-size: 21px;
+            font-weight: 700;
+        }
+
+        .summary {
+            display: grid;
+            grid-template-columns:
+                repeat(3, 1fr);
+            gap: 12px;
+        }
+
+        .summary-box {
+            padding: 16px;
+            border-radius: 10px;
+            background: #f9fafb;
         }
 
         .summary-value {
             display: block;
-            margin-top: 6px;
-            font-size: 25px;
+            margin-top: 5px;
+            font-size: 24px;
             font-weight: 700;
         }
 
         .batch-list {
             display: grid;
-            gap: 12px;
+            gap: 10px;
         }
 
         .batch-item {
@@ -2047,7 +2612,7 @@ foreach ($queue as $item) {
             justify-content: space-between;
             align-items: center;
             gap: 15px;
-            padding: 16px;
+            padding: 15px;
             border: 1px solid #e5e7eb;
             border-radius: 10px;
         }
@@ -2062,65 +2627,48 @@ foreach ($queue as $item) {
             font-size: 13px;
         }
 
-        .batch-open {
-            padding: 9px 14px;
-            border: 1px solid #d1d5db;
-            border-radius: 8px;
-            text-decoration: none;
-            color: inherit;
-            white-space: nowrap;
-        }
-
-        .queue-table-wrap {
+        .table-wrap {
             overflow-x: auto;
         }
 
-        .queue-table {
+        table {
             width: 100%;
-            min-width: 950px;
+            min-width: 900px;
             border-collapse: collapse;
         }
 
-        .queue-table th,
-        .queue-table td {
-            padding: 12px 10px;
+        th,
+        td {
+            padding: 10px 8px;
             border-bottom: 1px solid #e5e7eb;
             text-align: left;
             vertical-align: top;
         }
 
-        .queue-table th {
-            white-space: nowrap;
-        }
-
-        .glass-code {
-            font-weight: 700;
-        }
-
-        .priority {
-            font-weight: 600;
-        }
-
         .empty {
-            padding: 35px 15px;
-            color: #6b7280;
+            padding: 25px 10px;
             text-align: center;
+            color: #6b7280;
+        }
+
+        .actions {
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-top: 18px;
         }
 
         @media (
-            max-width: 700px
+            max-width: 750px
         ) {
 
             .scan-form {
                 flex-direction: column;
             }
 
-            .scan-submit {
-                width: 100%;
-            }
-
-            .work-summary {
-                grid-template-columns: 1fr;
+            .summary,
+            .order-preview-grid {
+                grid-template-columns: 1fr 1fr;
             }
 
             .batch-item {
@@ -2128,8 +2676,15 @@ foreach ($queue as $item) {
                 align-items: stretch;
             }
 
-            .batch-open {
-                text-align: center;
+        }
+
+        @media (
+            max-width: 500px
+        ) {
+
+            .summary,
+            .order-preview-grid {
+                grid-template-columns: 1fr;
             }
 
         }
@@ -2140,7 +2695,10 @@ foreach ($queue as $item) {
 
 <body>
 
-<?php require __DIR__ . '/../src/partials/header.php'; ?>
+<?php
+require __DIR__
+    . '/../src/partials/header.php';
+?>
 
 <main class="work-page">
 
@@ -2150,7 +2708,7 @@ foreach ($queue as $item) {
             Моя робота
         </h1>
 
-        <div class="work-meta">
+        <div class="muted">
 
             <?= e(
                 $user['name']
@@ -2160,8 +2718,11 @@ foreach ($queue as $item) {
             ·
 
             <?= e(
-                $user['stage_name']
-                ?? 'Дільницю не вказано'
+                stageLabel(
+                    $currentStage[
+                        'name'
+                    ]
+                )
             ) ?>
 
         </div>
@@ -2169,7 +2730,7 @@ foreach ($queue as $item) {
     </header>
 
 
-    <section class="scan-card">
+    <section class="card">
 
         <h2>
             Сканування
@@ -2177,9 +2738,13 @@ foreach ($queue as $item) {
 
         <div class="scan-description">
 
-            Відскануйте QR-код скла.
-            Одне сканування завершує поточну операцію
-            та автоматично передає скло на наступний етап.
+            Відскануйте QR-код конкретного скла
+            або службовий QR замовлення.
+
+            <br>
+
+            QR замовлення має формат:
+            <strong>ORDER-номер</strong>.
 
         </div>
 
@@ -2202,20 +2767,201 @@ foreach ($queue as $item) {
 
                 </div>
 
-                <div class="scan-result-message">
-
+                <div>
                     <?= $scanMessage ?>
-
                 </div>
 
 
                 <?php if (
-                    $scanType === 'success'
+                    $scanType ===
+                    'order_preview'
                     &&
-                    $scannedCode !== ''
+                    $orderQrPreview
                 ): ?>
 
-                    <div class="scan-actions">
+                    <div
+                        style="margin-top:12px;"
+                    >
+
+                        Клієнт:
+                        <strong>
+                            <?= e(
+                                $orderQrPreview[
+                                    'customer_name'
+                                ]
+                                ?? '—'
+                            ) ?>
+                        </strong>
+
+                        <br>
+
+                        Дільниця:
+                        <strong>
+                            <?= e(
+                                stageLabel(
+                                    $currentStage[
+                                        'name'
+                                    ]
+                                )
+                            ) ?>
+                        </strong>
+
+                        <br>
+
+                        Пріоритет:
+                        <strong>
+                            <?= e(
+                                priorityLabel(
+                                    (int)
+                                    $orderQrPreview[
+                                        'priority'
+                                    ]
+                                )
+                            ) ?>
+                        </strong>
+
+                    </div>
+
+
+                    <div class="order-preview-grid">
+
+                        <div class="preview-box">
+
+                            Доступно
+
+                            <span class="preview-value">
+                                <?= count(
+                                    $orderQrGlasses
+                                ) ?>
+                            </span>
+
+                        </div>
+
+                        <div class="preview-box">
+
+                            Площа
+
+                            <span class="preview-value">
+
+                                <?= number_format(
+                                    $orderQrArea,
+                                    2,
+                                    ',',
+                                    ' '
+                                ) ?>
+
+                                м²
+
+                            </span>
+
+                        </div>
+
+                        <div class="preview-box">
+
+                            У партіях
+
+                            <span class="preview-value">
+                                <?= $orderQrBatchCount ?>
+                            </span>
+
+                        </div>
+
+                        <div class="preview-box">
+
+                            Брак
+
+                            <span class="preview-value">
+                                <?= $orderQrRejectedCount ?>
+                            </span>
+
+                        </div>
+
+                    </div>
+
+
+                    <?php if (
+                        $orderQrGlasses
+                    ): ?>
+
+                        <form
+                            method="post"
+                            class="actions"
+                        >
+
+                            <input
+                                type="hidden"
+                                name="csrf_token"
+                                value="<?= e(
+                                    $csrfToken
+                                ) ?>"
+                            >
+
+                            <input
+                                type="hidden"
+                                name="action"
+                                value="complete_order_stage"
+                            >
+
+                            <input
+                                type="hidden"
+                                name="order_id"
+                                value="<?= (int)
+                                    $orderQrPreview[
+                                        'id'
+                                    ] ?>"
+                            >
+
+                            <button
+                                type="submit"
+                                class="button"
+                                onclick="return confirm('Завершити всі доступні стекла цього замовлення на поточній дільниці?');"
+                            >
+
+                                ✅ Завершити
+                                <?= count(
+                                    $orderQrGlasses
+                                ) ?>
+                                стекол
+
+                            </button>
+
+                            <a
+                                href="/work.php"
+                                class="button button-secondary"
+                            >
+                                Скасувати
+                            </a>
+
+                        </form>
+
+                    <?php else: ?>
+
+                        <div
+                            style="margin-top:15px;"
+                        >
+
+                            На цій дільниці немає
+                            доступного скла для масового завершення.
+
+                        </div>
+
+                    <?php endif; ?>
+
+                <?php elseif (
+                    $scanType ===
+                    'success'
+                    &&
+                    $scannedCode !== ''
+                    &&
+                    !str_starts_with(
+                        strtoupper(
+                            $scannedCode
+                        ),
+                        'ORDER-'
+                    )
+                ): ?>
+
+                    <div class="actions">
 
                         <?php if (
                             $canReject
@@ -2225,7 +2971,7 @@ foreach ($queue as $item) {
                                 href="/reject_glass.php?code=<?= urlencode(
                                     $scannedCode
                                 ) ?>"
-                                class="action-button action-button-danger"
+                                class="button button-danger"
                             >
                                 ❌ Оформити брак
                             </a>
@@ -2234,7 +2980,7 @@ foreach ($queue as $item) {
 
                         <a
                             href="/work.php"
-                            class="action-button action-button-secondary"
+                            class="button button-secondary"
                         >
                             Готово
                         </a>
@@ -2254,7 +3000,6 @@ foreach ($queue as $item) {
 
             <form
                 method="post"
-                id="scanForm"
                 class="scan-form"
             >
 
@@ -2275,107 +3020,82 @@ foreach ($queue as $item) {
                 <input
                     type="text"
                     name="code"
-                    id="scanCode"
                     class="scan-input"
-                    placeholder="Відскануйте QR-код"
+                    placeholder="QR скла або ORDER-номер"
                     autocomplete="off"
-                    autocapitalize="off"
-                    spellcheck="false"
                     autofocus
                     required
                 >
 
                 <button
                     type="submit"
-                    class="scan-submit"
+                    class="button"
                 >
                     Сканувати
                 </button>
 
             </form>
 
-
-            <div class="scan-ready">
-
-                Поле готове до наступного сканування.
-
-            </div>
-
-        <?php else: ?>
-
-            <div class="empty">
-
-                QR-сканування недоступне для вашого облікового запису.
-
-            </div>
-
         <?php endif; ?>
 
     </section>
 
 
-    <section class="work-summary">
+    <section class="card">
 
-        <div class="summary-card">
+        <div class="summary">
 
-            <div>
+            <div class="summary-box">
+
                 Скло в черзі
+
+                <span class="summary-value">
+                    <?= count($queue) ?>
+                </span>
+
             </div>
 
-            <span class="summary-value">
+            <div class="summary-box">
 
-                <?= count($queue) ?>
-
-            </span>
-
-        </div>
-
-
-        <div class="summary-card">
-
-            <div>
                 Площа черги
+
+                <span class="summary-value">
+
+                    <?= number_format(
+                        $queueArea,
+                        2,
+                        ',',
+                        ' '
+                    ) ?>
+
+                    м²
+
+                </span>
+
             </div>
 
-            <span class="summary-value">
+            <div class="summary-box">
 
-                <?= number_format(
-                    $queueArea,
-                    2,
-                    ',',
-                    ' '
-                ) ?>
-
-                м²
-
-            </span>
-
-        </div>
-
-
-        <div class="summary-card">
-
-            <div>
                 Мої активні партії
+
+                <span class="summary-value">
+                    <?= count(
+                        $batches
+                    ) ?>
+                </span>
+
             </div>
-
-            <span class="summary-value">
-
-                <?= count($batches) ?>
-
-            </span>
 
         </div>
 
     </section>
 
 
-    <section class="work-card">
+    <section class="card">
 
         <h2>
             Мої партії
         </h2>
-
 
         <?php if (
             !$batches
@@ -2383,7 +3103,7 @@ foreach ($queue as $item) {
 
             <div class="empty">
 
-                Вам поки не призначено активних партій.
+                Вам не призначено активних партій.
 
             </div>
 
@@ -2464,29 +3184,25 @@ foreach ($queue as $item) {
                                 Всього:
                                 <?= $total ?>
 
-                                ·
-
-                                Готово:
+                                · Готово:
                                 <?= $completed ?>
 
-                                ·
-
-                                Брак:
+                                · Брак:
                                 <?= $rejected ?>
 
-                                ·
-
-                                Залишилось:
+                                · Залишилось:
                                 <?= $remaining ?>
 
                             </div>
 
                         </div>
 
-
                         <a
-                            href="/batch.php?id=<?= (int) $batch['id'] ?>"
-                            class="batch-open"
+                            href="/batch.php?id=<?= (int)
+                                $batch[
+                                    'id'
+                                ] ?>"
+                            class="button button-secondary"
                         >
                             Відкрити партію
                         </a>
@@ -2502,18 +3218,20 @@ foreach ($queue as $item) {
     </section>
 
 
-    <section class="work-card">
+    <section class="card">
 
         <h2>
 
             Черга —
             <?= e(
-                $user['stage_name']
-                ?? ''
+                stageLabel(
+                    $currentStage[
+                        'name'
+                    ]
+                )
             ) ?>
 
         </h2>
-
 
         <?php if (
             !$queue
@@ -2521,59 +3239,32 @@ foreach ($queue as $item) {
 
             <div class="empty">
 
-                На дільниці зараз немає доступних робіт.
+                На дільниці немає доступного скла.
 
             </div>
 
         <?php else: ?>
 
-            <div class="queue-table-wrap">
+            <div class="table-wrap">
 
-                <table class="queue-table">
+                <table>
 
                     <thead>
 
                         <tr>
-
-                            <th>
-                                #
-                            </th>
-
-                            <th>
-                                Скло
-                            </th>
-
-                            <th>
-                                Замовлення
-                            </th>
-
-                            <th>
-                                Пріоритет
-                            </th>
-
-                            <th>
-                                Планова дата
-                            </th>
-
-                            <th>
-                                Розмір
-                            </th>
-
-                            <th>
-                                Товщина
-                            </th>
-
-                            <th>
-                                Площа
-                            </th>
+                            <th>#</th>
+                            <th>Скло</th>
+                            <th>Замовлення</th>
+                            <th>Пріоритет</th>
+                            <th>Розмір</th>
+                            <th>Товщина</th>
+                            <th>Площа</th>
 
                             <?php if (
                                 $canReject
                             ): ?>
 
-                                <th>
-                                    Дія
-                                </th>
+                                <th>Дія</th>
 
                             <?php endif; ?>
 
@@ -2595,16 +3286,15 @@ foreach ($queue as $item) {
                                 <?= $index + 1 ?>
                             </td>
 
-
                             <td>
 
-                                <div class="glass-code">
-
+                                <strong>
                                     <?= e(
-                                        $item['code']
+                                        $item[
+                                            'code'
+                                        ]
                                     ) ?>
-
-                                </div>
+                                </strong>
 
                                 <?php if (
                                     !empty(
@@ -2614,32 +3304,27 @@ foreach ($queue as $item) {
                                     )
                                 ): ?>
 
-                                    <small>
+                                    <br>
 
+                                    <small>
                                         <?= e(
                                             $item[
                                                 'glass_type'
                                             ]
                                         ) ?>
-
                                     </small>
 
                                 <?php endif; ?>
 
                             </td>
 
-
                             <td>
 
-                                <strong>
-
-                                    <?= e(
-                                        $item[
-                                            'order_number'
-                                        ]
-                                    ) ?>
-
-                                </strong>
+                                <?= e(
+                                    $item[
+                                        'order_number'
+                                    ]
+                                ) ?>
 
                                 <?php if (
                                     !empty(
@@ -2652,21 +3337,18 @@ foreach ($queue as $item) {
                                     <br>
 
                                     <small>
-
                                         <?= e(
                                             $item[
                                                 'customer_name'
                                             ]
                                         ) ?>
-
                                     </small>
 
                                 <?php endif; ?>
 
                             </td>
 
-
-                            <td class="priority">
+                            <td>
 
                                 <?= e(
                                     priorityLabel(
@@ -2678,23 +3360,6 @@ foreach ($queue as $item) {
                                 ) ?>
 
                             </td>
-
-
-                            <td>
-
-                                <?= $item[
-                                    'planned_date'
-                                ]
-                                    ? e(
-                                        $item[
-                                            'planned_date'
-                                        ]
-                                    )
-                                    : '—'
-                                ?>
-
-                            </td>
-
 
                             <td>
 
@@ -2714,55 +3379,45 @@ foreach ($queue as $item) {
 
                             </td>
 
-
                             <td>
 
-                                <?php if (
-                                    $item[
-                                        'thickness'
-                                    ] !== null
-                                ): ?>
-
-                                    <?= e(
+                                <?= $item[
+                                    'thickness'
+                                ] !== null
+                                    ? e(
                                         (string)
                                         $item[
                                             'thickness'
                                         ]
-                                    ) ?>
-
-                                    мм
-
-                                <?php else: ?>
-
-                                    —
-
-                                <?php endif; ?>
+                                    ) . ' мм'
+                                    : '—'
+                                ?>
 
                             </td>
-
 
                             <td>
 
                                 <?= number_format(
                                     (
-                                        (
-                                            (int)
-                                            $item[
-                                                'width'
-                                            ]
-                                            *
-                                            (int)
-                                            $item[
-                                                'height'
-                                            ]
-                                            *
+                                        (int)
+                                        $item[
+                                            'width'
+                                        ]
+                                        *
+                                        (int)
+                                        $item[
+                                            'height'
+                                        ]
+                                        *
+                                        max(
+                                            1,
                                             (int)
                                             $item[
                                                 'quantity'
                                             ]
                                         )
-                                        / 1000000
-                                    ),
+                                    )
+                                    / 1000000,
                                     2,
                                     ',',
                                     ' '
@@ -2772,7 +3427,6 @@ foreach ($queue as $item) {
 
                             </td>
 
-
                             <?php if (
                                 $canReject
                             ): ?>
@@ -2781,9 +3435,11 @@ foreach ($queue as $item) {
 
                                     <a
                                         href="/reject_glass.php?code=<?= urlencode(
-                                            $item['code']
+                                            $item[
+                                                'code'
+                                            ]
                                         ) ?>"
-                                        class="batch-open"
+                                        class="button button-danger"
                                     >
                                         ❌ Брак
                                     </a>
@@ -2807,189 +3463,6 @@ foreach ($queue as $item) {
     </section>
 
 </main>
-
-
-<script>
-
-document.addEventListener(
-    'DOMContentLoaded',
-    function () {
-
-        const input =
-            document.getElementById(
-                'scanCode'
-            );
-
-        const form =
-            document.getElementById(
-                'scanForm'
-            );
-
-        if (input) {
-            input.focus();
-        }
-
-        /*
-         * Після відправлення сторінки
-         * поле знову готове до сканування.
-         */
-
-        if (
-            input &&
-            form
-        ) {
-
-            form.addEventListener(
-                'submit',
-                function () {
-
-                    setTimeout(
-                        function () {
-
-                            input.value =
-                                '';
-
-                            input.focus();
-
-                        },
-                        100
-                    );
-                }
-            );
-        }
-
-        /*
-         * Автофокус після завантаження.
-         */
-
-        if (input) {
-
-            setTimeout(
-                function () {
-
-                    input.focus();
-
-                },
-                150
-            );
-        }
-
-        /*
-         * Успішне сканування.
-         */
-
-        <?php if (
-            $scanType === 'success'
-        ): ?>
-
-            try {
-
-                const AudioContext =
-                    window.AudioContext ||
-                    window.webkitAudioContext;
-
-                if (AudioContext) {
-
-                    const audio =
-                        new AudioContext();
-
-                    const oscillator =
-                        audio.createOscillator();
-
-                    const gain =
-                        audio.createGain();
-
-                    oscillator.type =
-                        'sine';
-
-                    oscillator.frequency.value =
-                        880;
-
-                    gain.gain.value =
-                        0.08;
-
-                    oscillator.connect(
-                        gain
-                    );
-
-                    gain.connect(
-                        audio.destination
-                    );
-
-                    oscillator.start();
-
-                    oscillator.stop(
-                        audio.currentTime +
-                        0.12
-                    );
-                }
-
-            } catch (
-                error
-            ) {
-                // Звук не впливає на виробництво.
-            }
-
-        <?php elseif (
-            $scanType === 'warning'
-            ||
-            $scanType === 'error'
-        ): ?>
-
-            try {
-
-                const AudioContext =
-                    window.AudioContext ||
-                    window.webkitAudioContext;
-
-                if (AudioContext) {
-
-                    const audio =
-                        new AudioContext();
-
-                    const oscillator =
-                        audio.createOscillator();
-
-                    const gain =
-                        audio.createGain();
-
-                    oscillator.type =
-                        'square';
-
-                    oscillator.frequency.value =
-                        220;
-
-                    gain.gain.value =
-                        0.05;
-
-                    oscillator.connect(
-                        gain
-                    );
-
-                    gain.connect(
-                        audio.destination
-                    );
-
-                    oscillator.start();
-
-                    oscillator.stop(
-                        audio.currentTime +
-                        0.18
-                    );
-                }
-
-            } catch (
-                error
-            ) {
-                // Звук не впливає на виробництво.
-            }
-
-        <?php endif; ?>
-
-    }
-);
-
-</script>
 
 </body>
 

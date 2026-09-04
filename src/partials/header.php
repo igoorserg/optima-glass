@@ -1,38 +1,18 @@
 <?php
 
-/*
-|--------------------------------------------------------------------------
-| Єдина навігація OPTIMA GLASS
-|--------------------------------------------------------------------------
-*/
-
-require_once __DIR__
-    . '/../permissions.php';
+require_once __DIR__ . '/../auth.php';
+require_once __DIR__ . '/../permissions.php';
 
 if (
     session_status()
-    !==
-    PHP_SESSION_ACTIVE
+    !== PHP_SESSION_ACTIVE
 ) {
     session_start();
 }
 
-$currentPage =
-    basename(
-        $_SERVER[
-            'PHP_SELF'
-        ]
-        ?? ''
-    );
-
 /*
 |--------------------------------------------------------------------------
 | Поточний користувач
-|--------------------------------------------------------------------------
-|
-| На основних сторінках змінна $user
-| уже отримана через require_user().
-|
 |--------------------------------------------------------------------------
 */
 
@@ -41,19 +21,95 @@ $headerUser =
         ? $user
         : current_user();
 
+$currentPage = basename(
+    $_SERVER['PHP_SELF'] ?? ''
+);
+
+$headerRole = $headerUser['role'] ?? '';
+
 /*
 |--------------------------------------------------------------------------
-| Допоміжна функція активного пункту
+| Назви ролей
 |--------------------------------------------------------------------------
 */
 
-function headerActive(
-    string $page,
-    string $currentPage
-): string {
-    return $page === $currentPage
-        ? 'nav-active'
-        : '';
+$headerRoleLabels = [
+    'superadmin'      => 'Суперадміністратор',
+    'admin'           => 'Адміністратор',
+    'manager'         => 'Менеджер',
+    'section_manager' => 'Начальник дільниці',
+    'employee'        => 'Працівник',
+];
+
+/*
+|--------------------------------------------------------------------------
+| Active menu
+|--------------------------------------------------------------------------
+*/
+
+if (!function_exists('headerActive')) {
+
+    function headerActive(
+        string $page,
+        string $currentPage
+    ): string {
+        return $page === $currentPage
+            ? 'nav-active'
+            : '';
+    }
+}
+
+/*
+|--------------------------------------------------------------------------
+| Додавання пункту меню
+|--------------------------------------------------------------------------
+*/
+
+if (!function_exists('headerMenuItem')) {
+
+    function headerMenuItem(
+        string $url,
+        string $label,
+        string $page,
+        string $currentPage,
+        bool $allowed = true,
+        string $extraClass = ''
+    ): void {
+
+        if (!$allowed) {
+            return;
+        }
+
+        $classes = trim(
+            headerActive(
+                $page,
+                $currentPage
+            )
+            . ' '
+            . $extraClass
+        );
+
+        ?>
+        <a
+            href="<?= htmlspecialchars(
+                $url,
+                ENT_QUOTES,
+                'UTF-8'
+            ) ?>"
+            class="<?= htmlspecialchars(
+                $classes,
+                ENT_QUOTES,
+                'UTF-8'
+            ) ?>"
+        >
+            <?= htmlspecialchars(
+                $label,
+                ENT_QUOTES,
+                'UTF-8'
+            ) ?>
+        </a>
+        <?php
+    }
 }
 
 ?>
@@ -89,6 +145,16 @@ function headerActive(
         color: #6b7280;
         font-size: 13px;
         text-align: right;
+        line-height: 1.45;
+    }
+
+    .app-user strong {
+        color: #111827;
+    }
+
+    .app-user-role {
+        color: #2563eb;
+        font-weight: 600;
     }
 
     .app-nav {
@@ -108,6 +174,9 @@ function headerActive(
         text-decoration: none;
         font-size: 14px;
         font-weight: 600;
+        transition:
+            background .15s ease,
+            color .15s ease;
     }
 
     .app-nav a:hover {
@@ -120,14 +189,13 @@ function headerActive(
         color: #ffffff;
     }
 
-    .app-nav-divider {
-        width: 1px;
-        min-height: 30px;
-        margin: 4px 2px;
-        background: #e5e7eb;
+    .app-nav .logout-link {
+        color: #991b1b;
+        margin-left: auto;
     }
 
-    .app-nav .logout-link {
+    .app-nav .logout-link:hover {
+        background: #fee2e2;
         color: #991b1b;
     }
 
@@ -135,16 +203,10 @@ function headerActive(
         font-weight: 700;
     }
 
-    @media (
-        max-width: 800px
-    ) {
+    @media (max-width: 900px) {
 
         .app-topbar {
             align-items: flex-start;
-        }
-
-        .app-nav-divider {
-            display: none;
         }
 
         .app-nav {
@@ -154,6 +216,10 @@ function headerActive(
         .app-nav a {
             padding: 0 9px;
             font-size: 13px;
+        }
+
+        .app-nav .logout-link {
+            margin-left: 0;
         }
 
     }
@@ -175,37 +241,39 @@ function headerActive(
             </a>
 
 
-            <?php if (
-                $headerUser
-            ): ?>
+            <?php if ($headerUser): ?>
 
                 <div class="app-user">
 
                     <strong>
                         <?= htmlspecialchars(
-                            $headerUser[
-                                'name'
-                            ]
-                            ?? '',
+                            $headerUser['name'] ?? '',
                             ENT_QUOTES,
                             'UTF-8'
                         ) ?>
                     </strong>
 
+                    <br>
+
+                    <span class="app-user-role">
+                        <?= htmlspecialchars(
+                            $headerRoleLabels[$headerRole]
+                                ?? $headerRole,
+                            ENT_QUOTES,
+                            'UTF-8'
+                        ) ?>
+                    </span>
+
                     <?php if (
                         !empty(
-                            $headerUser[
-                                'stage_name'
-                            ]
+                            $headerUser['stage_name']
                         )
                     ): ?>
 
                         <br>
 
                         <?= htmlspecialchars(
-                            $headerUser[
-                                'stage_name'
-                            ],
+                            $headerUser['stage_name'],
                             ENT_QUOTES,
                             'UTF-8'
                         ) ?>
@@ -219,389 +287,524 @@ function headerActive(
         </div>
 
 
-        <?php if (
-            $headerUser
-        ): ?>
+        <?php if ($headerUser): ?>
 
             <nav class="app-nav">
 
-                <!-- Головна -->
+                <?php
 
-                <a
-                    href="/"
-                    class="<?= headerActive(
+                /*
+                |--------------------------------------------------------------------------
+                | SUPERADMIN
+                |--------------------------------------------------------------------------
+                */
+
+                if ($headerRole === 'superadmin') {
+
+                    headerMenuItem(
+                        '/',
+                        '🏠 Головна',
                         'index.php',
                         $currentPage
-                    ) ?>"
-                >
-                    🏠 Головна
-                </a>
-
-
-                <!-- Робочий екран -->
-
-                <?php if (
-                    can(
-                        'production.view',
-                        $headerUser
-                    )
-                ): ?>
-
-                    <a
-                        href="/work.php"
-                        class="<?= headerActive(
-                            'work.php',
-                            $currentPage
-                        ) ?>"
-                    >
-                        👷 Моя робота
-                    </a>
-
-                <?php endif; ?>
-
-
-                <!-- Виробництво -->
-
-                <?php if (
-                    can(
-                        'production.view',
-                        $headerUser
-                    )
-                ): ?>
-
-                    <a
-                        href="/production.php"
-                        class="<?= headerActive(
-                            'production.php',
-                            $currentPage
-                        ) ?>"
-                    >
-                        🏭 Виробництво
-                    </a>
-
-                <?php endif; ?>
-
-
-                <!-- Скло -->
-
-                <?php if (
-                    can(
-                        'glass.view',
-                        $headerUser
-                    )
-                ): ?>
-
-                    <a
-                        href="/glasses.php"
-                        class="<?= headerActive(
-                            'glasses.php',
-                            $currentPage
-                        ) ?>"
-                    >
-                        🪟 Скло
-                    </a>
-
-                <?php endif; ?>
-
-
-                <!-- Створення скла -->
-
-                <?php if (
-                    can(
-                        'glass.create',
-                        $headerUser
-                    )
-                ): ?>
-
-                    <a
-                        href="/glass_create.php"
-                        class="<?= headerActive(
-                            'glass_create.php',
-                            $currentPage
-                        ) ?>"
-                    >
-                        ➕ Додати скло
-                    </a>
-
-                <?php endif; ?>
-
-
-                <!-- QR сканування -->
-
-                <?php if (
-                    can(
-                        'glass.scan',
-                        $headerUser
-                    )
-                ): ?>
-
-                    <a
-                        href="/scan.php"
-                        class="<?= headerActive(
-                            'scan.php',
-                            $currentPage
-                        ) ?>"
-                    >
-                        📷 QR
-                    </a>
-
-                <?php endif; ?>
-
-
-                <!-- Відвантаження -->
-
-                <?php if (
-                    can(
-                        'production.ship',
-                        $headerUser
-                    )
-                ): ?>
-
-                    <a
-                        href="/shipping.php"
-                        class="shipping-link <?= headerActive(
-                            'shipping.php',
-                            $currentPage
-                        ) ?>"
-                    >
-                        🚚 Відвантаження
-                    </a>
-
-                <?php endif; ?>
-
-
-                <!-- Сповіщення -->
-
-                <?php if (
-                    can(
-                        'notifications.view',
-                        $headerUser
-                    )
-                ): ?>
-
-                    <a
-                        href="/notifications.php"
-                        class="<?= headerActive(
-                            'notifications.php',
-                            $currentPage
-                        ) ?>"
-                    >
-                        🔔 Сповіщення
-                    </a>
-
-                <?php endif; ?>
-
-
-                <!-- Менеджерський екран -->
-
-                <?php if (
-                    can(
-                        'production.manage',
-                        $headerUser
-                    )
-                ): ?>
-
-                    <a
-                        href="/manager.php"
-                        class="<?= headerActive(
-                            'manager.php',
-                            $currentPage
-                        ) ?>"
-                    >
-                        📋 Менеджер
-                    </a>
-
-                <?php endif; ?>
-
-
-                <?php if (
-                    can(
-                        'employees.view',
-                        $headerUser
-                    )
-                    ||
-                    can(
-                        'roles.manage',
-                        $headerUser
-                    )
-                    ||
-                    can(
-                        'user_permissions.manage',
-                        $headerUser
-                    )
-                    ||
-                    can(
-                        'system.settings',
-                        $headerUser
-                    )
-                ): ?>
-
-                    <span
-                        class="app-nav-divider"
-                    ></span>
-
-                <?php endif; ?>
-
-
-                <!-- Працівники -->
-
-                <?php if (
-                    can(
-                        'employees.view',
-                        $headerUser
-                    )
-                ): ?>
-
-                    <a
-                        href="/employees.php"
-                        class="<?= headerActive(
-                            'employees.php',
-                            $currentPage
-                        ) ?>"
-                    >
-                        👥 Працівники
-                    </a>
-
-                <?php endif; ?>
-
-
-                <!-- Ролі -->
-
-                <?php if (
-                    can(
-                        'roles.manage',
-                        $headerUser
-                    )
-                    ||
-                    can(
-                        'system.roles',
-                        $headerUser
-                    )
-                ): ?>
-
-                    <a
-                        href="/roles.php"
-                        class="<?= headerActive(
-                            'roles.php',
-                            $currentPage
-                        ) ?>"
-                    >
-                        🔐 Ролі
-                    </a>
-
-                <?php endif; ?>
-
-
-                <!-- Індивідуальні права -->
-
-                <?php if (
-                    can(
-                        'user_permissions.manage',
-                        $headerUser
-                    )
-                ): ?>
-
-                    <a
-                        href="/user_permissions.php"
-                        class="<?= headerActive(
-                            'user_permissions.php',
-                            $currentPage
-                        ) ?>"
-                    >
-                        🛡 Права
-                    </a>
-
-                <?php endif; ?>
-
-
-                <!-- Виробничі дільниці -->
-
-                <?php if (
-                    can(
-                        'production.manage',
-                        $headerUser
-                    )
-                    ||
-                    can(
-                        'system.settings',
-                        $headerUser
-                    )
-                ): ?>
-
-                    <a
-                        href="/admin/stages.php"
-                        class="<?= headerActive(
-                            'stages.php',
-                            $currentPage
-                        ) ?>"
-                    >
-                        🏗 Дільниці
-                    </a>
-
-                <?php endif; ?>
-
-
-                <!-- Типи скла -->
-
-                <?php if (
-                    can(
-                        'system.settings',
-                        $headerUser
-                    )
-                    ||
-                    can(
-                        'glass.create',
-                        $headerUser
-                    )
-                ): ?>
-
-                    <a
-                        href="/admin/glass_types.php"
-                        class="<?= headerActive(
-                            'glass_types.php',
-                            $currentPage
-                        ) ?>"
-                    >
-                        🪟 Типи скла
-                    </a>
-
-                <?php endif; ?>
-
-
-                <!-- Імпорт -->
-
-                <?php if (
-                    can(
-                        'orders.create',
-                        $headerUser
-                    )
-                ): ?>
-
-                    <a
-                        href="/admin/import.php"
-                        class="<?= headerActive(
-                            'import.php',
-                            $currentPage
-                        ) ?>"
-                    >
-                        📥 Імпорт
-                    </a>
-
-                <?php endif; ?>
-
-
-                <span
-                    class="app-nav-divider"
-                ></span>
-
-
-                <!-- Вихід -->
+                    );
+
+                    headerMenuItem(
+                        '/production.php',
+                        '🏭 Виробництво',
+                        'production.php',
+                        $currentPage,
+                        can(
+                            'production.view',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/glasses.php',
+                        '🪟 Скло',
+                        'glasses.php',
+                        $currentPage,
+                        can(
+                            'glass.view',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/glass_create.php',
+                        '➕ Нове замовлення',
+                        'glass_create.php',
+                        $currentPage,
+                        can(
+                            'glass.create',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/shipping.php',
+                        '🚚 Відвантаження',
+                        'shipping.php',
+                        $currentPage,
+                        can(
+                            'production.ship',
+                            $headerUser
+                        ),
+                        'shipping-link'
+                    );
+
+                    headerMenuItem(
+                        '/manager.php',
+                        '📋 Менеджер',
+                        'manager.php',
+                        $currentPage,
+                        can(
+                            'orders.start_production',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/employees.php',
+                        '👥 Працівники',
+                        'employees.php',
+                        $currentPage,
+                        can(
+                            'employees.view',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/roles.php',
+                        '🔐 Ролі',
+                        'roles.php',
+                        $currentPage,
+                        can(
+                            'system.roles',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/user_permissions.php',
+                        '🛡 Права',
+                        'user_permissions.php',
+                        $currentPage,
+                        can(
+                            'user_permissions.manage',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/admin/stages.php',
+                        '🏗 Дільниці',
+                        'stages.php',
+                        $currentPage,
+                        can(
+                            'system.settings',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/admin/glass_types.php',
+                        '🪟 Типи скла',
+                        'glass_types.php',
+                        $currentPage,
+                        can(
+                            'system.settings',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/admin/import.php',
+                        '📥 Імпорт',
+                        'import.php',
+                        $currentPage,
+                        can(
+                            'orders.create',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/notifications.php',
+                        '🔔 Сповіщення',
+                        'notifications.php',
+                        $currentPage,
+                        can(
+                            'notifications.view',
+                            $headerUser
+                        )
+                    );
+                }
+
+                /*
+                |--------------------------------------------------------------------------
+                | ADMIN
+                |--------------------------------------------------------------------------
+                */
+
+                elseif ($headerRole === 'admin') {
+
+                    headerMenuItem(
+                        '/',
+                        '🏠 Головна',
+                        'index.php',
+                        $currentPage
+                    );
+
+                    headerMenuItem(
+                        '/production.php',
+                        '🏭 Виробництво',
+                        'production.php',
+                        $currentPage,
+                        can(
+                            'production.view',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/glasses.php',
+                        '🪟 Скло',
+                        'glasses.php',
+                        $currentPage,
+                        can(
+                            'glass.view',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/glass_create.php',
+                        '➕ Нове замовлення',
+                        'glass_create.php',
+                        $currentPage,
+                        can(
+                            'glass.create',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/shipping.php',
+                        '🚚 Відвантаження',
+                        'shipping.php',
+                        $currentPage,
+                        can(
+                            'production.ship',
+                            $headerUser
+                        ),
+                        'shipping-link'
+                    );
+
+                    headerMenuItem(
+                        '/manager.php',
+                        '📋 Менеджер',
+                        'manager.php',
+                        $currentPage,
+                        can(
+                            'orders.start_production',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/employees.php',
+                        '👥 Працівники',
+                        'employees.php',
+                        $currentPage,
+                        can(
+                            'employees.view',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/admin/stages.php',
+                        '🏗 Дільниці',
+                        'stages.php',
+                        $currentPage,
+                        can(
+                            'system.settings',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/admin/glass_types.php',
+                        '🪟 Типи скла',
+                        'glass_types.php',
+                        $currentPage,
+                        can(
+                            'system.settings',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/admin/import.php',
+                        '📥 Імпорт',
+                        'import.php',
+                        $currentPage,
+                        can(
+                            'orders.create',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/notifications.php',
+                        '🔔 Сповіщення',
+                        'notifications.php',
+                        $currentPage,
+                        can(
+                            'notifications.view',
+                            $headerUser
+                        )
+                    );
+                }
+
+                /*
+                |--------------------------------------------------------------------------
+                | MANAGER
+                |--------------------------------------------------------------------------
+                */
+
+                elseif ($headerRole === 'manager') {
+
+                    headerMenuItem(
+                        '/',
+                        '🏠 Головна',
+                        'index.php',
+                        $currentPage
+                    );
+
+                    headerMenuItem(
+                        '/production.php',
+                        '🏭 Виробництво',
+                        'production.php',
+                        $currentPage,
+                        can(
+                            'production.view',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/glasses.php',
+                        '🪟 Скло',
+                        'glasses.php',
+                        $currentPage,
+                        can(
+                            'glass.view',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/glass_create.php',
+                        '➕ Нове замовлення',
+                        'glass_create.php',
+                        $currentPage,
+                        can(
+                            'glass.create',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/shipping.php',
+                        '🚚 Відвантаження',
+                        'shipping.php',
+                        $currentPage,
+                        can(
+                            'production.ship',
+                            $headerUser
+                        ),
+                        'shipping-link'
+                    );
+
+                    headerMenuItem(
+                        '/manager.php',
+                        '📋 Менеджер',
+                        'manager.php',
+                        $currentPage,
+                        can(
+                            'orders.start_production',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/notifications.php',
+                        '🔔 Сповіщення',
+                        'notifications.php',
+                        $currentPage,
+                        can(
+                            'notifications.view',
+                            $headerUser
+                        )
+                    );
+                }
+
+                /*
+                |--------------------------------------------------------------------------
+                | SECTION MANAGER
+                |--------------------------------------------------------------------------
+                */
+
+                elseif ($headerRole === 'section_manager') {
+
+                    headerMenuItem(
+                        '/',
+                        '🏠 Головна',
+                        'index.php',
+                        $currentPage
+                    );
+
+                    headerMenuItem(
+                        '/work.php',
+                        '👷 Моя робота',
+                        'work.php',
+                        $currentPage,
+                        can(
+                            'production.view',
+                            $headerUser
+                        )
+                        && !empty(
+                            $headerUser['stage_id']
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/production.php',
+                        '🏭 Виробництво',
+                        'production.php',
+                        $currentPage,
+                        can(
+                            'production.view',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/glasses.php',
+                        '🪟 Скло',
+                        'glasses.php',
+                        $currentPage,
+                        can(
+                            'glass.view',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/scan.php',
+                        '📷 QR',
+                        'scan.php',
+                        $currentPage,
+                        can(
+                            'glass.scan',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/notifications.php',
+                        '🔔 Сповіщення',
+                        'notifications.php',
+                        $currentPage,
+                        can(
+                            'notifications.view',
+                            $headerUser
+                        )
+                    );
+                }
+
+                /*
+                |--------------------------------------------------------------------------
+                | EMPLOYEE
+                |--------------------------------------------------------------------------
+                */
+
+                elseif ($headerRole === 'employee') {
+
+                    headerMenuItem(
+                        '/work.php',
+                        '👷 Моя робота',
+                        'work.php',
+                        $currentPage,
+                        can(
+                            'production.view',
+                            $headerUser
+                        )
+                        && !empty(
+                            $headerUser['stage_id']
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/glasses.php',
+                        '🪟 Скло',
+                        'glasses.php',
+                        $currentPage,
+                        can(
+                            'glass.view',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/scan.php',
+                        '📷 QR',
+                        'scan.php',
+                        $currentPage,
+                        can(
+                            'glass.scan',
+                            $headerUser
+                        )
+                    );
+
+                    headerMenuItem(
+                        '/notifications.php',
+                        '🔔 Сповіщення',
+                        'notifications.php',
+                        $currentPage,
+                        can(
+                            'notifications.view',
+                            $headerUser
+                        )
+                    );
+                }
+
+                /*
+                |--------------------------------------------------------------------------
+                | Невідома роль
+                |--------------------------------------------------------------------------
+                */
+
+                else {
+
+                    headerMenuItem(
+                        '/',
+                        '🏠 Головна',
+                        'index.php',
+                        $currentPage
+                    );
+                }
+
+                ?>
 
                 <a
                     href="/logout.php"
                     class="logout-link"
                 >
-                    Вийти
+                    🚪 Вийти
                 </a>
 
             </nav>

@@ -1,13 +1,11 @@
 <?php
 
-session_start();
+require __DIR__ . '/../src/auth.php';
+require __DIR__ . '/../src/permissions.php';
 
-if (!isset($_SESSION['user_id'])) {
-    header('Location: /login.php');
-    exit;
-}
+$user = require_user();
 
-require __DIR__ . '/../src/db.php';
+require_permission('glass.view', $user);
 
 $stmt = $db->query("
     SELECT

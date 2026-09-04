@@ -1,14 +1,12 @@
 ```php
 <?php
 
-session_start();
+require __DIR__ . '/../src/auth.php';
+require __DIR__ . '/../src/permissions.php';
 
-if (!isset($_SESSION['user_id'])) {
-    header('Location: /login.php');
-    exit;
-}
+$user = require_user();
 
-require __DIR__ . '/../src/db.php';
+require_permission('glass.view', $user);
 
 function e(?string $value): string
 {
@@ -247,9 +245,13 @@ $locations = [
         <?php endif; ?>
 
         <p>
+            <?php if (can('glass.move', $user)): ?>
+
             <a href="/update_glass.php?code=<?= urlencode($glass['code']) ?>">
                 Изменить статус и участок
             </a>
+
+            <?php endif; ?>
         </p>
 
     </div>

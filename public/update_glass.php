@@ -1,13 +1,11 @@
 <?php
 
-session_start();
+require __DIR__ . '/../src/auth.php';
+require __DIR__ . '/../src/permissions.php';
 
-if (!isset($_SESSION['user_id'])) {
-    header('Location: /login.php');
-    exit;
-}
+$user = require_user();
 
-require __DIR__ . '/../src/db.php';
+require_permission('glass.move', $user);
 
 $code = trim($_GET['code'] ?? $_POST['code'] ?? '');
 
@@ -37,7 +35,26 @@ $statuses = [
 
 $error = '';
 
+if (
+    empty($_SESSION['update_glass_csrf'])
+    || !is_string($_SESSION['update_glass_csrf'])
+) {
+    $_SESSION['update_glass_csrf'] = bin2hex(random_bytes(32));
+}
+
+$csrfToken = $_SESSION['update_glass_csrf'];
+
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+
+    $submittedToken = $_POST['csrf_token'] ?? '';
+
+    if (
+        !is_string($submittedToken)
+        || !hash_equals($csrfToken, $submittedToken)
+    ) {
+        http_response_code(419);
+        exit('Недійсний CSRF-токен. Оновіть сторінку.');
+    }
     $newStatus = $_POST['status'] ?? '';
     $newLocation = trim($_POST['location'] ?? '');
     $comment = trim($_POST['comment'] ?? '');
@@ -86,7 +103,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
             $history->execute([
                 ':glass_id' => $glass['id'],
-                ':employee_id' => $_SESSION['user_id'],
+                ':employee_id' => (int) $user['id'],
                 ':old_status' => $glass['status'],
                 ':new_status' => $newStatus,
                 ':old_location' => $glass['current_location'],
@@ -130,6 +147,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 <?php endif; ?>
 
 <form method="post">
+
+    <input
+        type="hidden"
+        name="csrf_token"
+        value="<?= htmlspecialchars($csrfToken, ENT_QUOTES, 'UTF-8') ?>"
+    >
+
     <input type="hidden" name="code" value="<?= htmlspecialchars($glass['code'], ENT_QUOTES, 'UTF-8') ?>">
 
     <p>

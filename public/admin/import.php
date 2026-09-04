@@ -2,14 +2,12 @@
 
 declare(strict_types=1);
 
-session_start();
+require __DIR__ . '/../../src/auth.php';
+require __DIR__ . '/../../src/permissions.php';
 
-if (($_SESSION['user_role'] ?? '') !== 'admin') {
-    http_response_code(403);
-    exit('Доступ запрещён');
-}
+$user = require_user();
 
-require __DIR__ . '/../../src/db.php';
+require_permission('orders.create', $user);
 
 $message = '';
 $errors = [];

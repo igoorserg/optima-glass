@@ -1,12 +1,11 @@
 <?php
 
 require __DIR__ . '/../src/auth.php';
+require __DIR__ . '/../src/permissions.php';
 
-$user = require_roles([
-    'superadmin',
-    'admin',
-    'manager',
-]);
+$user = require_user();
+
+require_permission('orders.start_production', $user);
 
 function e(?string $value): string
 {

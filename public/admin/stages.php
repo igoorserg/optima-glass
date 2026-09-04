@@ -1,18 +1,11 @@
 <?php
 
-session_start();
+require __DIR__ . '/../../src/auth.php';
+require __DIR__ . '/../../src/permissions.php';
 
-if (!isset($_SESSION['user_id'])) {
-    header('Location: /login.php');
-    exit;
-}
+$user = require_user();
 
-if (($_SESSION['user_role'] ?? '') !== 'admin') {
-    http_response_code(403);
-    exit('Доступ запрещён.');
-}
-
-require __DIR__ . '/../../src/db.php';
+require_permission('system.settings', $user);
 
 $error = '';
 $success = '';

@@ -1,18 +1,11 @@
 <?php
 
-session_start();
+require __DIR__ . '/../src/auth.php';
+require __DIR__ . '/../src/permissions.php';
 
-if (!isset($_SESSION['user_id'])) {
-    header('Location: /login.php');
-    exit;
-}
+$currentUser = require_user();
 
-if (($_SESSION['user_role'] ?? '') !== 'admin') {
-    http_response_code(403);
-    exit('Доступ запрещён.');
-}
-
-require __DIR__ . '/../src/db.php';
+require_permission('employees.view', $currentUser);
 
 function e(?string $value): string
 {
@@ -21,9 +14,96 @@ function e(?string $value): string
 
 function roleLabel(string $role): string
 {
-    return $role === 'admin'
-        ? 'Администратор'
-        : 'Сотрудник';
+    return match ($role) {
+        'superadmin'      => 'Суперадміністратор',
+        'admin'           => 'Адміністратор',
+        'manager'         => 'Менеджер',
+        'section_manager' => 'Начальник дільниці',
+        'employee'        => 'Працівник',
+        default           => $role,
+    };
+}
+
+function roleNeedsStage(string $role): bool
+{
+    return in_array(
+        $role,
+        ['employee', 'section_manager'],
+        true
+    );
+}
+
+function allowedRolesForUser(array $currentUser): array
+{
+    if (($currentUser['role'] ?? '') === 'superadmin') {
+        return [
+            'superadmin',
+            'admin',
+            'manager',
+            'section_manager',
+            'employee',
+        ];
+    }
+
+    return [
+        'admin',
+        'manager',
+        'section_manager',
+        'employee',
+    ];
+}
+
+function canManageTarget(
+    array $currentUser,
+    array $targetUser
+): bool {
+    if (($currentUser['role'] ?? '') === 'superadmin') {
+        return true;
+    }
+
+    return ($targetUser['role'] ?? '') !== 'superadmin';
+}
+
+function loadUserById(PDO $db, int $userId): ?array
+{
+    $stmt = $db->prepare("
+        SELECT
+            id,
+            name,
+            email,
+            role,
+            active,
+            stage_id,
+            created_at
+        FROM users
+        WHERE id = :id
+        LIMIT 1
+    ");
+
+    $stmt->execute([
+        ':id' => $userId,
+    ]);
+
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
+
+    return $row ?: null;
+}
+
+function stageExists(PDO $db, int $stageId): bool
+{
+    $stmt = $db->prepare("
+        SELECT id
+        FROM production_stages
+        WHERE id = :id
+          AND active = 1
+        LIMIT 1
+    ");
+
+    $stmt->execute([
+        ':id' => $stageId,
+    ]);
+
+    return (bool) $stmt->fetch(PDO::FETCH_ASSOC);
 }
 
 $error = '';
@@ -31,7 +111,22 @@ $success = '';
 
 /*
 |--------------------------------------------------------------------------
-| Производственные участки
+| CSRF
+|--------------------------------------------------------------------------
+*/
+
+if (
+    empty($_SESSION['employees_csrf'])
+    || !is_string($_SESSION['employees_csrf'])
+) {
+    $_SESSION['employees_csrf'] = bin2hex(random_bytes(32));
+}
+
+$csrfToken = $_SESSION['employees_csrf'];
+
+/*
+|--------------------------------------------------------------------------
+| Виробничі дільниці
 |--------------------------------------------------------------------------
 */
 
@@ -46,59 +141,85 @@ $stages = $stageStmt->fetchAll(PDO::FETCH_ASSOC);
 
 /*
 |--------------------------------------------------------------------------
-| Добавление пользователя
+| POST actions
 |--------------------------------------------------------------------------
 */
 
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
-    $action = $_POST['action'] ?? '';
+    $submittedToken = $_POST['csrf_token'] ?? '';
+
+    if (
+        !is_string($submittedToken)
+        || !hash_equals($csrfToken, $submittedToken)
+    ) {
+        http_response_code(419);
+        exit('Недійсний CSRF-токен. Оновіть сторінку.');
+    }
+
+    $action = (string) ($_POST['action'] ?? '');
+
+    /*
+    |--------------------------------------------------------------------------
+    | Додавання користувача
+    |--------------------------------------------------------------------------
+    */
 
     if ($action === 'add') {
 
-        $name = trim($_POST['name'] ?? '');
-        $email = trim($_POST['email'] ?? '');
-        $password = $_POST['password'] ?? '';
-        $role = $_POST['role'] ?? 'employee';
+        if (!can('employees.create', $currentUser)) {
+            http_response_code(403);
+            exit('Недостатньо прав для створення користувачів.');
+        }
 
-        $stageId = $_POST['stage_id'] ?? '';
+        $name = trim((string) ($_POST['name'] ?? ''));
+        $email = trim((string) ($_POST['email'] ?? ''));
+        $password = (string) ($_POST['password'] ?? '');
+        $role = (string) ($_POST['role'] ?? 'employee');
+        $stageRaw = trim((string) ($_POST['stage_id'] ?? ''));
+
+        $allowedRoles = allowedRolesForUser($currentUser);
 
         if ($name === '') {
-            $error = 'Введите имя пользователя.';
+
+            $error = 'Вкажіть ім’я користувача.';
+
         } elseif ($email === '') {
-            $error = 'Введите email.';
+
+            $error = 'Вкажіть email.';
+
         } elseif (!filter_var($email, FILTER_VALIDATE_EMAIL)) {
-            $error = 'Введите корректный email.';
-        } elseif ($password === '') {
-            $error = 'Введите пароль.';
+
+            $error = 'Вкажіть коректний email.';
+
         } elseif (strlen($password) < 6) {
-            $error = 'Пароль должен содержать минимум 6 символов.';
-        } elseif (!in_array($role, ['employee', 'admin'], true)) {
-            $error = 'Недопустимая роль.';
-        } elseif ($role === 'employee' && $stageId === '') {
-            $error = 'Выберите производственный участок.';
+
+            $error = 'Пароль повинен містити щонайменше 6 символів.';
+
+        } elseif (!in_array($role, $allowedRoles, true)) {
+
+            $error = 'Недопустима роль користувача.';
+
         } else {
 
-            $stageId = $stageId === ''
-                ? null
-                : (int) $stageId;
+            $stageId = null;
 
-            if ($stageId !== null) {
+            if (roleNeedsStage($role)) {
 
-                $check = $db->prepare("
-                    SELECT id
-                    FROM production_stages
-                    WHERE id = :id
-                      AND active = 1
-                    LIMIT 1
-                ");
+                if ($stageRaw === '') {
 
-                $check->execute([
-                    ':id' => $stageId,
-                ]);
+                    $error = 'Для цієї ролі потрібно вибрати дільницю.';
 
-                if (!$check->fetch()) {
-                    $error = 'Выбранный участок недоступен.';
+                } else {
+
+                    $stageId = (int) $stageRaw;
+
+                    if (
+                        $stageId <= 0
+                        || !stageExists($db, $stageId)
+                    ) {
+                        $error = 'Вибрана дільниця недоступна.';
+                    }
                 }
             }
 
@@ -138,17 +259,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                         ':stage_id' => $stageId,
                     ]);
 
-                    $success = 'Пользователь успешно добавлен.';
+                    $success = 'Користувача успішно створено.';
 
                 } catch (PDOException $exception) {
 
-                    if (str_contains(
-                        strtolower($exception->getMessage()),
-                        'unique'
-                    )) {
-                        $error = 'Пользователь с таким email уже существует.';
+                    if (
+                        str_contains(
+                            strtolower($exception->getMessage()),
+                            'unique'
+                        )
+                    ) {
+                        $error = 'Користувач із таким email уже існує.';
                     } else {
-                        $error = 'Не удалось добавить пользователя.';
+                        $error = 'Не вдалося створити користувача.';
                     }
                 }
             }
@@ -157,76 +280,215 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     /*
     |--------------------------------------------------------------------------
-    | Изменение участка
+    | Редагування користувача
     |--------------------------------------------------------------------------
     */
 
-    if ($action === 'stage') {
+    elseif ($action === 'edit') {
+
+        if (!can('employees.edit', $currentUser)) {
+            http_response_code(403);
+            exit('Недостатньо прав для редагування користувачів.');
+        }
 
         $userId = (int) ($_POST['user_id'] ?? 0);
-        $stageId = (int) ($_POST['stage_id'] ?? 0);
+        $name = trim((string) ($_POST['name'] ?? ''));
+        $email = trim((string) ($_POST['email'] ?? ''));
+        $role = (string) ($_POST['role'] ?? '');
 
-        if ($userId <= 0) {
+        $targetUser = loadUserById($db, $userId);
 
-            $error = 'Некорректный пользователь.';
+        if (!$targetUser) {
 
-        } elseif ($stageId <= 0) {
+            $error = 'Користувача не знайдено.';
 
-            $error = 'Выберите участок.';
+        } elseif (!canManageTarget($currentUser, $targetUser)) {
+
+            http_response_code(403);
+            exit('Адміністратор не може змінювати суперадміністратора.');
+
+        } elseif ($name === '') {
+
+            $error = 'Вкажіть ім’я користувача.';
+
+        } elseif (
+            $email === ''
+            || !filter_var($email, FILTER_VALIDATE_EMAIL)
+        ) {
+
+            $error = 'Вкажіть коректний email.';
+
+        } elseif (
+            !in_array(
+                $role,
+                allowedRolesForUser($currentUser),
+                true
+            )
+        ) {
+
+            $error = 'Недопустима роль користувача.';
 
         } else {
 
-            $check = $db->prepare("
-                SELECT id
-                FROM production_stages
-                WHERE id = :id
-                  AND active = 1
-                LIMIT 1
-            ");
+            /*
+             * Для виробничих ролей залишаємо поточну дільницю.
+             * Для адміністративних ролей stage_id очищаємо.
+             */
 
-            $check->execute([
-                ':id' => $stageId,
-            ]);
+            $stageId = $targetUser['stage_id'];
 
-            if (!$check->fetch()) {
+            if (!roleNeedsStage($role)) {
+                $stageId = null;
+            }
 
-                $error = 'Выбранный участок недоступен.';
+            if (
+                roleNeedsStage($role)
+                && empty($stageId)
+            ) {
+                $error = 'Спочатку призначте користувачу виробничу дільницю.';
+            }
 
-            } else {
+            if ($error === '') {
 
-                $update = $db->prepare("
-                    UPDATE users
-                    SET stage_id = :stage_id
-                    WHERE id = :id
-                ");
+                try {
 
-                $update->execute([
-                    ':stage_id' => $stageId,
-                    ':id' => $userId,
-                ]);
+                    $update = $db->prepare("
+                        UPDATE users
+                        SET
+                            name = :name,
+                            email = :email,
+                            role = :role,
+                            stage_id = :stage_id
+                        WHERE id = :id
+                    ");
 
-                $success = 'Участок пользователя изменён.';
+                    $update->execute([
+                        ':name' => $name,
+                        ':email' => $email,
+                        ':role' => $role,
+                        ':stage_id' => $stageId,
+                        ':id' => $userId,
+                    ]);
+
+                    /*
+                     * Якщо користувач редагує сам себе,
+                     * синхронізуємо базові дані сесії.
+                     */
+
+                    if (
+                        $userId ===
+                        (int) ($currentUser['id'] ?? 0)
+                    ) {
+                        $_SESSION['user_name'] = $name;
+                        $_SESSION['user_role'] = $role;
+                    }
+
+                    $success = 'Дані користувача оновлено.';
+
+                } catch (PDOException $exception) {
+
+                    if (
+                        str_contains(
+                            strtolower($exception->getMessage()),
+                            'unique'
+                        )
+                    ) {
+                        $error = 'Користувач із таким email уже існує.';
+                    } else {
+                        $error = 'Не вдалося оновити користувача.';
+                    }
+                }
             }
         }
     }
 
     /*
     |--------------------------------------------------------------------------
-    | Включение / отключение пользователя
+    | Призначення дільниці
     |--------------------------------------------------------------------------
     */
 
-    if ($action === 'toggle') {
+    elseif ($action === 'stage') {
+
+        if (!can('employees.assign_stage', $currentUser)) {
+            http_response_code(403);
+            exit('Недостатньо прав для призначення дільниці.');
+        }
+
+        $userId = (int) ($_POST['user_id'] ?? 0);
+        $stageId = (int) ($_POST['stage_id'] ?? 0);
+
+        $targetUser = loadUserById($db, $userId);
+
+        if (!$targetUser) {
+
+            $error = 'Користувача не знайдено.';
+
+        } elseif (!canManageTarget($currentUser, $targetUser)) {
+
+            http_response_code(403);
+            exit('Адміністратор не може змінювати суперадміністратора.');
+
+        } elseif (!roleNeedsStage($targetUser['role'])) {
+
+            $error = 'Для цієї ролі виробнича дільниця не використовується.';
+
+        } elseif (
+            $stageId <= 0
+            || !stageExists($db, $stageId)
+        ) {
+
+            $error = 'Вибрана дільниця недоступна.';
+
+        } else {
+
+            $update = $db->prepare("
+                UPDATE users
+                SET stage_id = :stage_id
+                WHERE id = :id
+            ");
+
+            $update->execute([
+                ':stage_id' => $stageId,
+                ':id' => $userId,
+            ]);
+
+            $success = 'Дільницю користувача змінено.';
+        }
+    }
+
+    /*
+    |--------------------------------------------------------------------------
+    | Увімкнення / вимкнення
+    |--------------------------------------------------------------------------
+    */
+
+    elseif ($action === 'toggle') {
+
+        if (!can('employees.disable', $currentUser)) {
+            http_response_code(403);
+            exit('Недостатньо прав для зміни статусу користувача.');
+        }
 
         $userId = (int) ($_POST['user_id'] ?? 0);
 
-        if ($userId === (int) $_SESSION['user_id']) {
+        $targetUser = loadUserById($db, $userId);
 
-            $error = 'Нельзя отключить текущего администратора.';
+        if (!$targetUser) {
 
-        } elseif ($userId <= 0) {
+            $error = 'Користувача не знайдено.';
 
-            $error = 'Некорректный пользователь.';
+        } elseif (
+            $userId ===
+            (int) ($currentUser['id'] ?? 0)
+        ) {
+
+            $error = 'Не можна вимкнути власний обліковий запис.';
+
+        } elseif (!canManageTarget($currentUser, $targetUser)) {
+
+            http_response_code(403);
+            exit('Адміністратор не може вимкнути суперадміністратора.');
 
         } else {
 
@@ -243,14 +505,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 ':id' => $userId,
             ]);
 
-            $success = 'Статус пользователя изменён.';
+            $success = 'Статус користувача змінено.';
         }
+    }
+
+    else {
+
+        $error = 'Невідома дія.';
     }
 }
 
 /*
 |--------------------------------------------------------------------------
-| Получаем пользователей
+| Користувачі
 |--------------------------------------------------------------------------
 */
 
@@ -267,14 +534,30 @@ $userStmt = $db->query("
     FROM users u
     LEFT JOIN production_stages ps
         ON ps.id = u.stage_id
-    ORDER BY u.id DESC
+    ORDER BY
+        CASE u.role
+            WHEN 'superadmin' THEN 1
+            WHEN 'admin' THEN 2
+            WHEN 'manager' THEN 3
+            WHEN 'section_manager' THEN 4
+            WHEN 'employee' THEN 5
+            ELSE 6
+        END,
+        u.id
 ");
 
-$users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
+$employees = $userStmt->fetchAll(PDO::FETCH_ASSOC);
+
+$canCreate = can('employees.create', $currentUser);
+$canEdit = can('employees.edit', $currentUser);
+$canDisable = can('employees.disable', $currentUser);
+$canAssignStage = can('employees.assign_stage', $currentUser);
+
+$availableRoles = allowedRolesForUser($currentUser);
 
 ?>
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="uk">
 
 <head>
 
@@ -285,7 +568,7 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
         content="width=device-width, initial-scale=1.0"
     >
 
-    <title>Сотрудники — Optima Glass</title>
+    <title>Працівники — Optima Glass</title>
 
     <link
         rel="stylesheet"
@@ -295,7 +578,7 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
     <style>
 
         .employees-page {
-            max-width: 1200px;
+            max-width: 1400px;
             margin: 0 auto;
             padding: 30px 20px;
         }
@@ -306,6 +589,11 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
             border-radius: 14px;
             background: #fff;
             border: 1px solid #e5e7eb;
+        }
+
+        .employees-card h1,
+        .employees-card h2 {
+            margin-top: 0;
         }
 
         .employees-form {
@@ -325,10 +613,14 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
         }
 
         .employees-field input,
-        .employees-field select {
+        .employees-field select,
+        .inline-edit input,
+        .inline-edit select,
+        .stage-form select {
             width: 100%;
             min-height: 42px;
             padding: 9px 12px;
+            box-sizing: border-box;
         }
 
         .employees-table-wrap {
@@ -338,6 +630,7 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
         .employees-table {
             width: 100%;
             border-collapse: collapse;
+            min-width: 1150px;
         }
 
         .employees-table th,
@@ -374,14 +667,52 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
             font-weight: 600;
         }
 
-        .stage-form {
+        .role-badge {
+            display: inline-block;
+            padding: 5px 9px;
+            border-radius: 999px;
+            background: #eef2ff;
+            font-size: 13px;
+            font-weight: 600;
+        }
+
+        .stage-form,
+        .inline-actions {
             display: flex;
             gap: 8px;
+            align-items: center;
         }
 
         .stage-form select {
-            flex: 1;
             min-width: 150px;
+        }
+
+        .inline-edit {
+            display: grid;
+            gap: 8px;
+            min-width: 210px;
+        }
+
+        .employee-note {
+            color: #6b7280;
+            font-size: 13px;
+        }
+
+        .employee-actions {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            min-width: 135px;
+        }
+
+        .employee-actions form {
+            margin: 0;
+        }
+
+        .employee-actions button,
+        .stage-form button,
+        .inline-edit button {
+            white-space: nowrap;
         }
 
         @media (max-width: 700px) {
@@ -396,6 +727,7 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
 
             .stage-form {
                 flex-direction: column;
+                align-items: stretch;
             }
 
         }
@@ -410,15 +742,15 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
 
 <main class="employees-page">
 
-    <div class="employees-card">
+    <section class="employees-card">
 
-        <h1>Сотрудники</h1>
+        <h1>👥 Працівники</h1>
 
         <p>
-            Управление пользователями и их производственными участками.
+            Користувачі системи, їхні ролі, доступ і виробничі дільниці.
         </p>
 
-    </div>
+    </section>
 
     <?php if ($error !== ''): ?>
 
@@ -437,151 +769,157 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
     <?php endif; ?>
 
 
-    <!-- Добавление пользователя -->
+    <?php if ($canCreate): ?>
 
-    <section class="employees-card">
+        <section class="employees-card">
 
-        <h2>Добавить пользователя</h2>
+            <h2>Додати користувача</h2>
 
-        <form
-            method="post"
-            class="employees-form"
-        >
-
-            <input
-                type="hidden"
-                name="action"
-                value="add"
+            <form
+                method="post"
+                class="employees-form"
             >
 
-            <div class="employees-field">
-
-                <label for="name">
-                    Имя
-                </label>
+                <input
+                    type="hidden"
+                    name="csrf_token"
+                    value="<?= e($csrfToken) ?>"
+                >
 
                 <input
-                    type="text"
-                    id="name"
-                    name="name"
-                    required
+                    type="hidden"
+                    name="action"
+                    value="add"
                 >
 
-            </div>
+                <div class="employees-field">
 
+                    <label for="name">
+                        Ім’я
+                    </label>
 
-            <div class="employees-field">
+                    <input
+                        type="text"
+                        id="name"
+                        name="name"
+                        required
+                    >
 
-                <label for="email">
-                    Email
-                </label>
+                </div>
 
-                <input
-                    type="email"
-                    id="email"
-                    name="email"
-                    required
-                >
+                <div class="employees-field">
 
-            </div>
+                    <label for="email">
+                        Email
+                    </label>
 
+                    <input
+                        type="email"
+                        id="email"
+                        name="email"
+                        required
+                    >
 
-            <div class="employees-field">
+                </div>
 
-                <label for="password">
-                    Пароль
-                </label>
+                <div class="employees-field">
 
-                <input
-                    type="password"
-                    id="password"
-                    name="password"
-                    minlength="6"
-                    required
-                >
+                    <label for="password">
+                        Пароль
+                    </label>
 
-            </div>
+                    <input
+                        type="password"
+                        id="password"
+                        name="password"
+                        minlength="6"
+                        required
+                    >
 
+                </div>
 
-            <div class="employees-field">
+                <div class="employees-field">
 
-                <label for="role">
-                    Роль
-                </label>
+                    <label for="role">
+                        Роль
+                    </label>
 
-                <select
-                    id="role"
-                    name="role"
-                    required
-                >
+                    <select
+                        id="role"
+                        name="role"
+                        required
+                    >
 
-                    <option value="employee">
-                        Сотрудник
-                    </option>
+                        <?php foreach ($availableRoles as $role): ?>
 
-                    <option value="admin">
-                        Администратор
-                    </option>
+                            <option
+                                value="<?= e($role) ?>"
+                                <?= $role === 'employee' ? 'selected' : '' ?>
+                            >
+                                <?= e(roleLabel($role)) ?>
+                            </option>
 
-                </select>
+                        <?php endforeach; ?>
 
-            </div>
+                    </select>
 
+                </div>
 
-            <div class="employees-field">
+                <div class="employees-field">
 
-                <label for="stage_id">
-                    Производственный участок
-                </label>
+                    <label for="stage_id">
+                        Виробнича дільниця
+                    </label>
 
-                <select
-                    id="stage_id"
-                    name="stage_id"
-                >
+                    <select
+                        id="stage_id"
+                        name="stage_id"
+                    >
 
-                    <option value="">
-                        Выберите участок
-                    </option>
-
-                    <?php foreach ($stages as $stage): ?>
-
-                        <option
-                            value="<?= (int) $stage['id'] ?>"
-                        >
-                            <?= e($stage['name']) ?>
+                        <option value="">
+                            Без дільниці
                         </option>
 
-                    <?php endforeach; ?>
+                        <?php foreach ($stages as $stage): ?>
 
-                </select>
+                            <option
+                                value="<?= (int) $stage['id'] ?>"
+                            >
+                                <?= e($stage['name']) ?>
+                            </option>
 
-            </div>
+                        <?php endforeach; ?>
 
+                    </select>
 
-            <div class="employees-field full">
+                    <span class="employee-note">
+                        Для працівника та начальника дільниці вибір дільниці обов’язковий.
+                    </span>
 
-                <button type="submit">
-                    Добавить пользователя
-                </button>
+                </div>
 
-            </div>
+                <div class="employees-field full">
 
-        </form>
+                    <button type="submit">
+                        ➕ Додати користувача
+                    </button>
 
-    </section>
+                </div>
 
+            </form>
 
-    <!-- Список пользователей -->
+        </section>
+
+    <?php endif; ?>
+
 
     <section class="employees-card">
 
-        <h2>Пользователи</h2>
+        <h2>Користувачі</h2>
 
-        <?php if (!$users): ?>
+        <?php if (!$employees): ?>
 
-            <p>
-                Пользователей пока нет.
-            </p>
+            <p>Користувачів поки немає.</p>
 
         <?php else: ?>
 
@@ -593,82 +931,101 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
 
                         <tr>
                             <th>ID</th>
-                            <th>Имя</th>
-                            <th>Email</th>
+                            <th>Користувач</th>
                             <th>Роль</th>
-                            <th>Участок</th>
+                            <th>Дільниця</th>
                             <th>Статус</th>
-                            <th>Создан</th>
-                            <th>Действия</th>
+                            <th>Створено</th>
+                            <th>Дії</th>
                         </tr>
 
                     </thead>
 
                     <tbody>
 
-                    <?php foreach ($users as $user): ?>
+                    <?php foreach ($employees as $employee): ?>
+
+                        <?php
+                        $targetManageable =
+                            canManageTarget(
+                                $currentUser,
+                                $employee
+                            );
+
+                        $isCurrent =
+                            (int) $employee['id'] ===
+                            (int) ($currentUser['id'] ?? 0);
+                        ?>
 
                         <tr>
 
                             <td>
-                                <?= (int) $user['id'] ?>
-                            </td>
-
-                            <td>
-                                <?= e($user['name']) ?>
-                            </td>
-
-                            <td>
-                                <?= e($user['email']) ?>
-                            </td>
-
-                            <td>
-                                <?= e(roleLabel($user['role'])) ?>
+                                <?= (int) $employee['id'] ?>
                             </td>
 
                             <td>
 
-                                <?php if ($user['role'] === 'admin'): ?>
-
-                                    <strong>
-                                        Все участки
-                                    </strong>
-
-                                <?php else: ?>
+                                <?php if (
+                                    $canEdit
+                                    && $targetManageable
+                                ): ?>
 
                                     <form
                                         method="post"
-                                        class="stage-form"
+                                        class="inline-edit"
                                     >
 
                                         <input
                                             type="hidden"
+                                            name="csrf_token"
+                                            value="<?= e($csrfToken) ?>"
+                                        >
+
+                                        <input
+                                            type="hidden"
                                             name="action"
-                                            value="stage"
+                                            value="edit"
                                         >
 
                                         <input
                                             type="hidden"
                                             name="user_id"
-                                            value="<?= (int) $user['id'] ?>"
+                                            value="<?= (int) $employee['id'] ?>"
                                         >
 
-                                        <select
-                                            name="stage_id"
+                                        <input
+                                            type="text"
+                                            name="name"
+                                            value="<?= e($employee['name']) ?>"
                                             required
                                         >
 
-                                            <option value="">
-                                                Выберите участок
-                                            </option>
+                                        <input
+                                            type="email"
+                                            name="email"
+                                            value="<?= e($employee['email']) ?>"
+                                            required
+                                        >
 
-                                            <?php foreach ($stages as $stage): ?>
+                                        <select
+                                            name="role"
+                                            required
+                                        >
+
+                                            <?php
+                                            $editRoles =
+                                                allowedRolesForUser(
+                                                    $currentUser
+                                                );
+                                            ?>
+
+                                            <?php foreach ($editRoles as $role): ?>
 
                                                 <option
-                                                    value="<?= (int) $stage['id'] ?>"
-                                                    <?= (int) $user['stage_id'] === (int) $stage['id'] ? 'selected' : '' ?>
+                                                    value="<?= e($role) ?>"
+                                                    <?= $employee['role'] === $role ? 'selected' : '' ?>
                                                 >
-                                                    <?= e($stage['name']) ?>
+                                                    <?= e(roleLabel($role)) ?>
                                                 </option>
 
                                             <?php endforeach; ?>
@@ -676,27 +1033,21 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
                                         </select>
 
                                         <button type="submit">
-                                            Сохранить
+                                            💾 Зберегти
                                         </button>
 
                                     </form>
 
-                                <?php endif; ?>
-
-                            </td>
-
-                            <td>
-
-                                <?php if ((int) $user['active'] === 1): ?>
-
-                                    <span class="employee-active">
-                                        Активен
-                                    </span>
-
                                 <?php else: ?>
 
-                                    <span class="employee-inactive">
-                                        Отключён
+                                    <strong>
+                                        <?= e($employee['name']) ?>
+                                    </strong>
+
+                                    <br>
+
+                                    <span class="employee-note">
+                                        <?= e($employee['email']) ?>
                                     </span>
 
                                 <?php endif; ?>
@@ -704,55 +1055,182 @@ $users = $userStmt->fetchAll(PDO::FETCH_ASSOC);
                             </td>
 
                             <td>
-                                <?= e($user['created_at']) ?>
+
+                                <span class="role-badge">
+                                    <?= e(roleLabel($employee['role'])) ?>
+                                </span>
+
                             </td>
 
                             <td>
 
                                 <?php if (
-                                    (int) $user['id'] !==
-                                    (int) $_SESSION['user_id']
+                                    roleNeedsStage(
+                                        $employee['role']
+                                    )
                                 ): ?>
 
-                                    <form method="post">
+                                    <?php if (
+                                        $canAssignStage
+                                        && $targetManageable
+                                    ): ?>
 
-                                        <input
-                                            type="hidden"
-                                            name="action"
-                                            value="toggle"
+                                        <form
+                                            method="post"
+                                            class="stage-form"
                                         >
 
-                                        <input
-                                            type="hidden"
-                                            name="user_id"
-                                            value="<?= (int) $user['id'] ?>"
-                                        >
+                                            <input
+                                                type="hidden"
+                                                name="csrf_token"
+                                                value="<?= e($csrfToken) ?>"
+                                            >
 
-                                        <button type="submit">
+                                            <input
+                                                type="hidden"
+                                                name="action"
+                                                value="stage"
+                                            >
 
-                                            <?php if (
-                                                (int) $user['active'] === 1
-                                            ): ?>
+                                            <input
+                                                type="hidden"
+                                                name="user_id"
+                                                value="<?= (int) $employee['id'] ?>"
+                                            >
 
-                                                Отключить
+                                            <select
+                                                name="stage_id"
+                                                required
+                                            >
 
-                                            <?php else: ?>
+                                                <option value="">
+                                                    Виберіть дільницю
+                                                </option>
 
-                                                Включить
+                                                <?php foreach ($stages as $stage): ?>
 
-                                            <?php endif; ?>
+                                                    <option
+                                                        value="<?= (int) $stage['id'] ?>"
+                                                        <?= (int) $employee['stage_id'] === (int) $stage['id'] ? 'selected' : '' ?>
+                                                    >
+                                                        <?= e($stage['name']) ?>
+                                                    </option>
 
-                                        </button>
+                                                <?php endforeach; ?>
 
-                                    </form>
+                                            </select>
+
+                                            <button type="submit">
+                                                💾
+                                            </button>
+
+                                        </form>
+
+                                    <?php else: ?>
+
+                                        <?= e(
+                                            $employee['stage_name']
+                                            ?: 'Не призначено'
+                                        ) ?>
+
+                                    <?php endif; ?>
 
                                 <?php else: ?>
 
-                                    <span>
-                                        Текущий пользователь
+                                    <strong>
+                                        Усі дільниці
+                                    </strong>
+
+                                <?php endif; ?>
+
+                            </td>
+
+                            <td>
+
+                                <?php if (
+                                    (int) $employee['active'] === 1
+                                ): ?>
+
+                                    <span class="employee-active">
+                                        ● Активний
+                                    </span>
+
+                                <?php else: ?>
+
+                                    <span class="employee-inactive">
+                                        ● Вимкнений
                                     </span>
 
                                 <?php endif; ?>
+
+                            </td>
+
+                            <td>
+                                <?= e($employee['created_at']) ?>
+                            </td>
+
+                            <td>
+
+                                <div class="employee-actions">
+
+                                    <?php if ($isCurrent): ?>
+
+                                        <span class="employee-note">
+                                            Поточний користувач
+                                        </span>
+
+                                    <?php elseif (
+                                        $canDisable
+                                        && $targetManageable
+                                    ): ?>
+
+                                        <form method="post">
+
+                                            <input
+                                                type="hidden"
+                                                name="csrf_token"
+                                                value="<?= e($csrfToken) ?>"
+                                            >
+
+                                            <input
+                                                type="hidden"
+                                                name="action"
+                                                value="toggle"
+                                            >
+
+                                            <input
+                                                type="hidden"
+                                                name="user_id"
+                                                value="<?= (int) $employee['id'] ?>"
+                                            >
+
+                                            <button type="submit">
+
+                                                <?php if (
+                                                    (int) $employee['active'] === 1
+                                                ): ?>
+
+                                                    ⛔ Вимкнути
+
+                                                <?php else: ?>
+
+                                                    ✅ Увімкнути
+
+                                                <?php endif; ?>
+
+                                            </button>
+
+                                        </form>
+
+                                    <?php else: ?>
+
+                                        <span class="employee-note">
+                                            —
+                                        </span>
+
+                                    <?php endif; ?>
+
+                                </div>
 
                             </td>
 

@@ -1,8 +1,11 @@
 <?php
 
 require __DIR__ . '/../src/auth.php';
+require __DIR__ . '/../src/permissions.php';
 
 $user = require_user();
+
+require_permission('glass.scan', $user);
 
 function e(?string $value): string
 {

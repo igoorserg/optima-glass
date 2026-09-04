@@ -1,16 +1,12 @@
 <?php
 
-session_start();
+require __DIR__ . '/../src/auth.php';
+require __DIR__ . '/../src/permissions.php';
 
-if (!isset($_SESSION['user_id'])) {
-    header('Location: /login.php');
-    exit;
-}
+$user = require_user();
 
-require __DIR__ . '/../src/db.php';
-
-$name = $_SESSION['user_name'];
-$role = $_SESSION['user_role'];
+$name = $user['name'] ?? '';
+$role = $user['role'] ?? '';
 
 $dateFrom = $_GET['date_from'] ?? '';
 $dateTo = $_GET['date_to'] ?? '';

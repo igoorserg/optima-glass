@@ -90,6 +90,8 @@ if (!function_exists('headerMenuItem')) {
         );
 
         ?>
+<link rel="stylesheet" href="/assets/css/app.css">
+
         <a
             href="<?= htmlspecialchars(
                 $url,
@@ -113,118 +115,7 @@ if (!function_exists('headerMenuItem')) {
 }
 
 ?>
-<style>
 
-    .app-header {
-        background: #ffffff;
-        border-bottom: 1px solid #e5e7eb;
-    }
-
-    .app-header-inner {
-        max-width: 1400px;
-        margin: 0 auto;
-        padding: 14px 20px;
-    }
-
-    .app-topbar {
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        gap: 20px;
-    }
-
-    .app-brand {
-        color: #111827;
-        text-decoration: none;
-        font-size: 20px;
-        font-weight: 800;
-        white-space: nowrap;
-    }
-
-    .app-user {
-        color: #6b7280;
-        font-size: 13px;
-        text-align: right;
-        line-height: 1.45;
-    }
-
-    .app-user strong {
-        color: #111827;
-    }
-
-    .app-user-role {
-        color: #2563eb;
-        font-weight: 600;
-    }
-
-    .app-nav {
-        display: flex;
-        flex-wrap: wrap;
-        gap: 7px;
-        margin-top: 13px;
-    }
-
-    .app-nav a {
-        display: inline-flex;
-        align-items: center;
-        min-height: 38px;
-        padding: 0 11px;
-        border-radius: 7px;
-        color: #374151;
-        text-decoration: none;
-        font-size: 14px;
-        font-weight: 600;
-        transition:
-            background .15s ease,
-            color .15s ease;
-    }
-
-    .app-nav a:hover {
-        background: #f3f4f6;
-        color: #111827;
-    }
-
-    .app-nav a.nav-active {
-        background: #111827;
-        color: #ffffff;
-    }
-
-    .app-nav .logout-link {
-        color: #991b1b;
-        margin-left: auto;
-    }
-
-    .app-nav .logout-link:hover {
-        background: #fee2e2;
-        color: #991b1b;
-    }
-
-    .app-nav .shipping-link {
-        font-weight: 700;
-    }
-
-    @media (max-width: 900px) {
-
-        .app-topbar {
-            align-items: flex-start;
-        }
-
-        .app-nav {
-            gap: 5px;
-        }
-
-        .app-nav a {
-            padding: 0 9px;
-            font-size: 13px;
-        }
-
-        .app-nav .logout-link {
-            margin-left: 0;
-        }
-
-    }
-
-</style>
 
 
 <header class="app-header">

@@ -359,7 +359,33 @@ if (
             );
         }
 
+        /*
+         * Відвантаження завершується виключно через shipping.php.
+         */
+
         if (
+            in_array(
+                trim(
+                    (string)
+                    ($batch['stage_name'] ?? '')
+                ),
+                [
+                    'Відвантаження',
+                    'Отгрузка',
+                ],
+                true
+            )
+        ) {
+            $messageType =
+                'error';
+
+            $messageTitle =
+                'Партію не завершено';
+
+            $messageText =
+                'Етап «Відвантаження» завершується тільки менеджером через сторінку відвантаження.';
+
+        } elseif (
             !in_array(
                 $batch[
                     'status'

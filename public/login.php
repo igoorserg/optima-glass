@@ -2,70 +2,222 @@
 
 session_start();
 
-if (isset($_SESSION['user_id'])) {
-    header('Location: /index.php');
-    exit;
-}
-
 require __DIR__ . '/../src/db.php';
 
-$error = '';
-
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $email = trim($_POST['email'] ?? '');
-    $password = $_POST['password'] ?? '';
-
-    if ($email === '' || $password === '') {
-        $error = 'Введите email и пароль.';
-    } else {
-        $stmt = $db->prepare("
-            SELECT id, name, email, password, role
-            FROM users
-            WHERE email = :email
-              AND active = 1
-            LIMIT 1
-        ");
-
-        $stmt->execute([
-            ':email' => $email
-        ]);
-
-        $user = $stmt->fetch(PDO::FETCH_ASSOC);
-
-        if ($user && password_verify($password, $user['password'])) {
-            $_SESSION['user_id'] = $user['id'];
-            $_SESSION['user_email'] = $user['email'];
-            $_SESSION['user_name'] = $user['name'];
-            $_SESSION['user_role'] = $user['role'];
-
-            header('Location: /index.php');
-            exit;
-        }
-
-        $error = 'Неверный email или пароль.';
-    }
-}
+/*
+|--------------------------------------------------------------------------
+| Допоміжні функції
+|--------------------------------------------------------------------------
+*/
 
 function e(?string $value): string
 {
-    return htmlspecialchars($value ?? '', ENT_QUOTES, 'UTF-8');
+    return htmlspecialchars(
+        $value ?? '',
+        ENT_QUOTES,
+        'UTF-8'
+    );
+}
+
+function redirectAfterLogin(
+    string $role
+): never {
+
+    $location =
+        match ($role) {
+
+            'employee',
+            'section_manager'
+                => '/work.php',
+
+            'manager'
+                => '/production.php',
+
+            'admin',
+            'superadmin'
+                => '/index.php',
+
+            default
+                => '/index.php',
+        };
+
+    header(
+        'Location: '
+        . $location
+    );
+
+    exit;
+}
+
+/*
+|--------------------------------------------------------------------------
+| Уже авторизований користувач
+|--------------------------------------------------------------------------
+*/
+
+if (
+    isset(
+        $_SESSION['user_id']
+    )
+) {
+
+    redirectAfterLogin(
+        $_SESSION[
+            'user_role'
+        ]
+        ?? ''
+    );
+}
+
+/*
+|--------------------------------------------------------------------------
+| Вхід
+|--------------------------------------------------------------------------
+*/
+
+$error = '';
+
+if (
+    $_SERVER[
+        'REQUEST_METHOD'
+    ]
+    ===
+    'POST'
+) {
+
+    $email =
+        trim(
+            $_POST[
+                'email'
+            ]
+            ?? ''
+        );
+
+    $password =
+        $_POST[
+            'password'
+        ]
+        ?? '';
+
+    if (
+        $email === ''
+        ||
+        $password === ''
+    ) {
+
+        $error =
+            'Введіть email і пароль.';
+
+    } else {
+
+        $stmt =
+            $db->prepare("
+                SELECT
+                    id,
+                    name,
+                    email,
+                    password,
+                    role
+                FROM users
+                WHERE email =
+                    :email
+                  AND active = 1
+                LIMIT 1
+            ");
+
+        $stmt->execute([
+            ':email' =>
+                $email,
+        ]);
+
+        $user =
+            $stmt->fetch(
+                PDO::FETCH_ASSOC
+            );
+
+        if (
+            $user
+            &&
+            password_verify(
+                $password,
+                $user[
+                    'password'
+                ]
+            )
+        ) {
+
+            session_regenerate_id(
+                true
+            );
+
+            $_SESSION[
+                'user_id'
+            ] =
+                (int)
+                $user[
+                    'id'
+                ];
+
+            $_SESSION[
+                'user_email'
+            ] =
+                $user[
+                    'email'
+                ];
+
+            $_SESSION[
+                'user_name'
+            ] =
+                $user[
+                    'name'
+                ];
+
+            $_SESSION[
+                'user_role'
+            ] =
+                $user[
+                    'role'
+                ];
+
+            redirectAfterLogin(
+                $user[
+                    'role'
+                ]
+            );
+        }
+
+        $error =
+            'Невірний email або пароль.';
+    }
 }
 
 ?>
 <!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+<html lang="uk">
 
-    <title>OPTIMA GLASS — Вход</title>
+<head>
+
+    <meta charset="UTF-8">
+
+    <meta
+        name="viewport"
+        content="width=device-width, initial-scale=1.0"
+    >
+
+    <title>
+        OPTIMA GLASS — Вхід
+    </title>
 
     <meta
         name="description"
-        content="Вход в производственную систему OPTIMA GLASS"
+        content="Вхід у виробничу систему OPTIMA GLASS"
     >
 
-    <link rel="stylesheet" href="/assets/css/login.css">
+    <link
+        rel="stylesheet"
+        href="/assets/css/login.css"
+    >
+
 </head>
 
 <body>
@@ -76,11 +228,17 @@ function e(?string $value): string
 
         <div class="login-header">
 
-            <div class="logo-icon">⚡</div>
+            <div class="logo-icon">
+                ⚡
+            </div>
 
-            <h2>OPTIMA GLASS</h2>
+            <h2>
+                OPTIMA GLASS
+            </h2>
 
-            <p>Производственная система</p>
+            <p>
+                Виробнича система
+            </p>
 
         </div>
 
@@ -91,7 +249,11 @@ function e(?string $value): string
             autocomplete="on"
         >
 
-            <div class="form-group <?= $error ? 'error' : '' ?>">
+            <div
+                class="form-group <?= $error
+                    ? 'error'
+                    : '' ?>"
+            >
 
                 <div class="input-wrapper">
 
@@ -99,24 +261,39 @@ function e(?string $value): string
                         type="email"
                         id="email"
                         name="email"
-                        value="<?= e($_POST['email'] ?? '') ?>"
+                        value="<?= e(
+                            $_POST[
+                                'email'
+                            ]
+                            ?? ''
+                        ) ?>"
                         required
                         autocomplete="email"
                         autofocus
                     >
 
-                    <label for="email">Email</label>
+                    <label for="email">
+                        Email
+                    </label>
 
-                    <span class="input-line"></span>
+                    <span
+                        class="input-line"
+                    ></span>
 
                 </div>
 
             </div>
 
 
-            <div class="form-group <?= $error ? 'error' : '' ?>">
+            <div
+                class="form-group <?= $error
+                    ? 'error'
+                    : '' ?>"
+            >
 
-                <div class="input-wrapper password-wrapper">
+                <div
+                    class="input-wrapper password-wrapper"
+                >
 
                     <input
                         type="password"
@@ -126,32 +303,46 @@ function e(?string $value): string
                         autocomplete="current-password"
                     >
 
-                    <label for="password">Пароль</label>
+                    <label for="password">
+                        Пароль
+                    </label>
 
                     <button
                         type="button"
                         class="password-toggle"
                         id="passwordToggle"
-                        aria-label="Показать пароль"
+                        aria-label="Показати пароль"
                     >
-                        <span class="toggle-icon"></span>
+                        <span
+                            class="toggle-icon"
+                        ></span>
                     </button>
 
-                    <span class="input-line"></span>
+                    <span
+                        class="input-line"
+                    ></span>
 
                 </div>
 
             </div>
 
 
-            <?php if ($error): ?>
+            <?php if (
+                $error !== ''
+            ): ?>
 
                 <div
                     class="error-message show"
                     role="alert"
-                    style="opacity: 1; transform: translateY(0); margin-bottom: 20px;"
+                    style="
+                        opacity: 1;
+                        transform: translateY(0);
+                        margin-bottom: 20px;
+                    "
                 >
-                    <?= e($error) ?>
+                    <?= e(
+                        $error
+                    ) ?>
                 </div>
 
             <?php endif; ?>
@@ -163,12 +354,16 @@ function e(?string $value): string
             >
 
                 <span class="btn-text">
-                    Войти
+                    Увійти
                 </span>
 
-                <span class="btn-loader"></span>
+                <span
+                    class="btn-loader"
+                ></span>
 
-                <span class="btn-glow"></span>
+                <span
+                    class="btn-glow"
+                ></span>
 
             </button>
 
@@ -179,11 +374,17 @@ function e(?string $value): string
 
     <div class="background-effects">
 
-        <div class="glow-orb glow-orb-1"></div>
+        <div
+            class="glow-orb glow-orb-1"
+        ></div>
 
-        <div class="glow-orb glow-orb-2"></div>
+        <div
+            class="glow-orb glow-orb-2"
+        ></div>
 
-        <div class="glow-orb glow-orb-3"></div>
+        <div
+            class="glow-orb glow-orb-3"
+        ></div>
 
     </div>
 
@@ -191,58 +392,112 @@ function e(?string $value): string
 
 
 <script>
-document.addEventListener('DOMContentLoaded', function () {
 
-    const passwordInput = document.getElementById('password');
-    const passwordToggle = document.getElementById('passwordToggle');
-    const toggleIcon = passwordToggle
-        ? passwordToggle.querySelector('.toggle-icon')
-        : null;
+document.addEventListener(
+    'DOMContentLoaded',
+    function () {
 
-    if (passwordToggle && passwordInput) {
-
-        passwordToggle.addEventListener('click', function () {
-
-            const isPassword = passwordInput.type === 'password';
-
-            passwordInput.type = isPassword ? 'text' : 'password';
-
-            passwordToggle.setAttribute(
-                'aria-label',
-                isPassword
-                    ? 'Скрыть пароль'
-                    : 'Показать пароль'
+        const passwordInput =
+            document.getElementById(
+                'password'
             );
 
-            if (toggleIcon) {
-                toggleIcon.classList.toggle(
-                    'show-password',
-                    isPassword
+        const passwordToggle =
+            document.getElementById(
+                'passwordToggle'
+            );
+
+        const toggleIcon =
+            passwordToggle
+                ? passwordToggle
+                    .querySelector(
+                        '.toggle-icon'
+                    )
+                : null;
+
+        if (
+            passwordToggle
+            &&
+            passwordInput
+        ) {
+
+            passwordToggle
+                .addEventListener(
+                    'click',
+                    function () {
+
+                        const isPassword =
+                            passwordInput
+                                .type
+                            ===
+                            'password';
+
+                        passwordInput.type =
+                            isPassword
+                                ? 'text'
+                                : 'password';
+
+                        passwordToggle
+                            .setAttribute(
+                                'aria-label',
+                                isPassword
+                                    ? 'Сховати пароль'
+                                    : 'Показати пароль'
+                            );
+
+                        if (
+                            toggleIcon
+                        ) {
+
+                            toggleIcon
+                                .classList
+                                .toggle(
+                                    'show-password',
+                                    isPassword
+                                );
+                        }
+                    }
                 );
-            }
+        }
 
-        });
 
+        const form =
+            document.querySelector(
+                '.login-form'
+            );
+
+        const button =
+            document.querySelector(
+                '.login-btn'
+            );
+
+        if (
+            form
+            &&
+            button
+        ) {
+
+            form.addEventListener(
+                'submit',
+                function () {
+
+                    if (
+                        form.checkValidity()
+                    ) {
+
+                        button.classList
+                            .add(
+                                'loading'
+                            );
+                    }
+                }
+            );
+        }
     }
+);
 
-
-    const form = document.querySelector('.login-form');
-    const button = document.querySelector('.login-btn');
-
-    if (form && button) {
-
-        form.addEventListener('submit', function () {
-
-            if (form.checkValidity()) {
-                button.classList.add('loading');
-            }
-
-        });
-
-    }
-
-});
 </script>
 
 </body>
+
 </html>

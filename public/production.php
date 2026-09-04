@@ -2213,10 +2213,24 @@ foreach ($queue as $glass) {
                             </div>
 
 
-                            <form
-                                method="post"
-                                class="priority-form"
-                            >
+                            <div class="priority-form">
+
+                                <a
+                                    href="/order.php?number=<?= urlencode(
+                                        (string)
+                                        $stageOrder[
+                                            'order_number'
+                                        ]
+                                    ) ?>"
+                                    class="button button-secondary"
+                                >
+                                    Відкрити замовлення
+                                </a>
+
+                                <form
+                                    method="post"
+                                    class="priority-form"
+                                >
 
                                 <input
                                     type="hidden"
@@ -2305,7 +2319,9 @@ foreach ($queue as $glass) {
                                     Змінити
                                 </button>
 
-                            </form>
+                                </form>
+
+                            </div>
 
                         </div>
 
@@ -2478,6 +2494,19 @@ foreach ($queue as $glass) {
                                 </div>
 
                             </div>
+
+
+                            <a
+                                href="/order.php?number=<?= urlencode(
+                                    (string)
+                                    $orderData[
+                                        'order_number'
+                                    ]
+                                ) ?>"
+                                class="button button-secondary"
+                            >
+                                Відкрити замовлення
+                            </a>
 
 
                         </div>

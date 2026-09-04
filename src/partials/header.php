@@ -37,11 +37,9 @@ $currentPage =
 */
 
 $headerUser =
-    isset($user)
-    &&
-    is_array($user)
+    isset($user) && is_array($user)
         ? $user
-        : null;
+        : current_user();
 
 /*
 |--------------------------------------------------------------------------

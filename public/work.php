@@ -4,6 +4,7 @@ require __DIR__ . '/../src/auth.php';
 require __DIR__ . '/../src/notifications.php';
 require __DIR__ . '/../src/telegram.php';
 require __DIR__ . '/../src/permissions.php';
+require_once __DIR__ . '/../src/team_work.php';
 
 $user = require_user();
 
@@ -110,6 +111,22 @@ function writeAudit(
             ?? null,
     ]);
 }
+
+
+/*
+|--------------------------------------------------------------------------
+| Розподіл виробітку між працівниками
+|--------------------------------------------------------------------------
+|
+| Якщо активної спільної роботи немає:
+| працівник, який виконав сканування, отримує 100%.
+|
+| Якщо є активна work_session на цій дільниці:
+| площа розподіляється між її учасниками.
+|
+*/
+
+
 
 /*
 |--------------------------------------------------------------------------
@@ -339,6 +356,387 @@ if (
     $action =
         $_POST['action']
         ?? '';
+
+    /*
+    |--------------------------------------------------------------------------
+    | Спільна робота
+    |--------------------------------------------------------------------------
+    */
+
+    if (
+        $action === 'team_start'
+    ) {
+
+        $teammateId =
+            (int) (
+                $_POST['teammate_id']
+                ?? 0
+            );
+
+        if (
+            $teammateId <= 0
+            ||
+            $teammateId ===
+                (int)$user['id']
+        ) {
+
+            $_SESSION['team_flash'] = [
+                'type' => 'error',
+                'message' => 'Оберіть напарника.',
+            ];
+
+            header('Location: /work.php');
+            exit;
+        }
+
+        try {
+
+            $db->beginTransaction();
+
+            /*
+             * Перевіряємо напарника.
+             */
+
+            $teammateStmt =
+                $db->prepare("
+                    SELECT
+                        id,
+                        name,
+                        active
+                    FROM users
+                    WHERE id = :id
+                      AND active = 1
+                      AND role IN (
+                          'employee',
+                          'section_manager'
+                      )
+                    LIMIT 1
+                ");
+
+            $teammateStmt->execute([
+                ':id' => $teammateId,
+            ]);
+
+            $teammate =
+                $teammateStmt->fetch(
+                    PDO::FETCH_ASSOC
+                );
+
+            if (!$teammate) {
+
+                throw new RuntimeException(
+                    'Напарника не знайдено або він неактивний.'
+                );
+            }
+
+            /*
+             * Поточний працівник не повинен бути
+             * учасником іншої активної команди.
+             */
+
+            $busySelfStmt =
+                $db->prepare("
+                    SELECT
+                        ws.id
+                    FROM work_sessions ws
+
+                    JOIN work_session_members wsm
+                        ON wsm.work_session_id = ws.id
+
+                    WHERE ws.active = 1
+                      AND ws.mode = 'team'
+                      AND wsm.employee_id = :employee_id
+
+                    LIMIT 1
+                ");
+
+            $busySelfStmt->execute([
+                ':employee_id' =>
+                    (int)$user['id'],
+            ]);
+
+            $busySelfSession =
+                $busySelfStmt->fetchColumn();
+
+            if (
+                $busySelfSession !== false
+            ) {
+
+                throw new RuntimeException(
+                    'Ви вже перебуваєте в активній спільній роботі. Спочатку завершіть її.'
+                );
+            }
+
+            /*
+             * Напарник теж не повинен одночасно
+             * перебувати в іншій активній команді.
+             */
+
+            $busyTeammateStmt =
+                $db->prepare("
+                    SELECT
+                        ws.id
+                    FROM work_sessions ws
+
+                    JOIN work_session_members wsm
+                        ON wsm.work_session_id = ws.id
+
+                    WHERE ws.active = 1
+                      AND ws.mode = 'team'
+                      AND wsm.employee_id = :employee_id
+
+                    LIMIT 1
+                ");
+
+            $busyTeammateStmt->execute([
+                ':employee_id' =>
+                    $teammateId,
+            ]);
+
+            $busyTeammateSession =
+                $busyTeammateStmt->fetchColumn();
+
+            if (
+                $busyTeammateSession !== false
+            ) {
+
+                throw new RuntimeException(
+                    'Обраний працівник уже бере участь в іншій активній команді.'
+                );
+            }
+
+            /*
+             * Створюємо активну команду
+             * на поточній дільниці.
+             */
+
+            $sessionStmt =
+                $db->prepare("
+                    INSERT INTO work_sessions (
+                        owner_employee_id,
+                        stage_id,
+                        mode,
+                        active,
+                        started_at,
+                        created_at,
+                        updated_at
+                    )
+                    VALUES (
+                        :owner_employee_id,
+                        :stage_id,
+                        'team',
+                        1,
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP
+                    )
+                ");
+
+            $sessionStmt->execute([
+                ':owner_employee_id' =>
+                    (int)$user['id'],
+
+                ':stage_id' =>
+                    $stageId,
+            ]);
+
+            $workSessionId =
+                (int)$db->lastInsertId();
+
+            /*
+             * Власник команди — 50%.
+             */
+
+            $memberStmt =
+                $db->prepare("
+                    INSERT INTO work_session_members (
+                        work_session_id,
+                        employee_id,
+                        share_percent
+                    )
+                    VALUES (
+                        :work_session_id,
+                        :employee_id,
+                        :share_percent
+                    )
+                ");
+
+            $memberStmt->execute([
+                ':work_session_id' =>
+                    $workSessionId,
+
+                ':employee_id' =>
+                    (int)$user['id'],
+
+                ':share_percent' =>
+                    50,
+            ]);
+
+            /*
+             * Напарник — 50%.
+             */
+
+            $memberStmt->execute([
+                ':work_session_id' =>
+                    $workSessionId,
+
+                ':employee_id' =>
+                    $teammateId,
+
+                ':share_percent' =>
+                    50,
+            ]);
+
+            writeAudit(
+                $db,
+                (int)$user['id'],
+                'team_work_started',
+                'work_session',
+                $workSessionId,
+                null,
+                [
+                    'stage_id' =>
+                        $stageId,
+
+                    'members' => [
+                        [
+                            'employee_id' =>
+                                (int)$user['id'],
+                            'share_percent' =>
+                                50,
+                        ],
+                        [
+                            'employee_id' =>
+                                $teammateId,
+                            'share_percent' =>
+                                50,
+                        ],
+                    ],
+                ]
+            );
+
+            $db->commit();
+
+            $_SESSION['team_flash'] = [
+                'type' => 'success',
+                'message' =>
+                    'Спільну роботу розпочато: '
+                    . ($user['name'] ?? 'Працівник')
+                    . ' + '
+                    . $teammate['name']
+                    . '.',
+            ];
+
+        } catch (Throwable $exception) {
+
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+
+            $_SESSION['team_flash'] = [
+                'type' => 'error',
+                'message' =>
+                    $exception->getMessage(),
+            ];
+        }
+
+        header('Location: /work.php');
+        exit;
+    }
+
+    if (
+        $action === 'team_end'
+    ) {
+
+        try {
+
+            $db->beginTransaction();
+
+            $activeStmt =
+                $db->prepare("
+                    SELECT id
+                    FROM work_sessions
+                    WHERE owner_employee_id =
+                        :owner_employee_id
+                      AND active = 1
+                      AND mode = 'team'
+                    ORDER BY id DESC
+                    LIMIT 1
+                ");
+
+            $activeStmt->execute([
+                ':owner_employee_id' =>
+                    (int)$user['id'],
+            ]);
+
+            $sessionId =
+                $activeStmt->fetchColumn();
+
+            if (
+                $sessionId === false
+            ) {
+
+                throw new RuntimeException(
+                    'Активної спільної роботи не знайдено.'
+                );
+            }
+
+            $endStmt =
+                $db->prepare("
+                    UPDATE work_sessions
+                    SET
+                        active = 0,
+                        ended_at =
+                            CURRENT_TIMESTAMP,
+                        updated_at =
+                            CURRENT_TIMESTAMP
+                    WHERE id = :id
+                ");
+
+            $endStmt->execute([
+                ':id' =>
+                    (int)$sessionId,
+            ]);
+
+            writeAudit(
+                $db,
+                (int)$user['id'],
+                'team_work_ended',
+                'work_session',
+                (int)$sessionId,
+                [
+                    'active' => 1,
+                ],
+                [
+                    'active' => 0,
+                ]
+            );
+
+            $db->commit();
+
+            $_SESSION['team_flash'] = [
+                'type' => 'success',
+                'message' =>
+                    'Спільну роботу завершено. Тепер ваш виробіток знову рахується 100% вам.',
+            ];
+
+        } catch (Throwable $exception) {
+
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+
+            $_SESSION['team_flash'] = [
+                'type' => 'error',
+                'message' =>
+                    $exception->getMessage(),
+            ];
+        }
+
+        header('Location: /work.php');
+        exit;
+    }
+
 
     /*
     |--------------------------------------------------------------------------
@@ -1159,6 +1557,23 @@ if (
                                 'Операцію завершено QR-скануванням.',
                         ]);
 
+
+                        /*
+                         * Фіксуємо персональний виробіток.
+                         */
+
+                        $operationId =
+                            (int)
+                            $db->lastInsertId();
+
+                        recordOperationWorkers(
+                            $db,
+                            $operationId,
+                            (int)$user['id'],
+                            $stageId,
+                            $currentGlass
+                        );
+
                         /*
                          * glass_history.
                          */
@@ -1814,6 +2229,22 @@ if (
                         ':comment' =>
                             'Масове завершення QR-кодом замовлення.',
                     ]);
+
+                    /*
+                     * Фіксуємо персональний виробіток для масового завершення.
+                     */
+
+                    $operationId =
+                        (int)
+                        $db->lastInsertId();
+
+                    recordOperationWorkers(
+                        $db,
+                        $operationId,
+                        (int)$user['id'],
+                        $stageId,
+                        $glass
+                    );
 
                     /*
                      * history.
@@ -2472,6 +2903,118 @@ foreach (
         / 1000000;
 }
 
+
+/*
+|--------------------------------------------------------------------------
+| Активна спільна робота
+|--------------------------------------------------------------------------
+*/
+
+$teamFlash =
+    $_SESSION['team_flash']
+    ?? null;
+
+unset(
+    $_SESSION['team_flash']
+);
+
+$activeTeam = null;
+$activeTeamMembers = [];
+
+$activeTeamStmt =
+    $db->prepare("
+        SELECT
+            ws.id,
+            ws.stage_id,
+            ws.started_at
+        FROM work_sessions ws
+        WHERE ws.owner_employee_id =
+            :employee_id
+          AND ws.active = 1
+          AND ws.mode = 'team'
+        ORDER BY ws.id DESC
+        LIMIT 1
+    ");
+
+$activeTeamStmt->execute([
+    ':employee_id' =>
+        (int)$user['id'],
+]);
+
+$activeTeam =
+    $activeTeamStmt->fetch(
+        PDO::FETCH_ASSOC
+    );
+
+if ($activeTeam) {
+
+    $activeTeamMembersStmt =
+        $db->prepare("
+            SELECT
+                u.id,
+                u.name,
+                wsm.share_percent
+            FROM work_session_members wsm
+
+            JOIN users u
+                ON u.id =
+                    wsm.employee_id
+
+            WHERE wsm.work_session_id =
+                :session_id
+
+            ORDER BY wsm.id
+        ");
+
+    $activeTeamMembersStmt->execute([
+        ':session_id' =>
+            (int)$activeTeam['id'],
+    ]);
+
+    $activeTeamMembers =
+        $activeTeamMembersStmt->fetchAll(
+            PDO::FETCH_ASSOC
+        );
+}
+
+/*
+ * Працівники, яких можна обрати напарниками.
+ */
+
+$teammatesStmt =
+    $db->prepare("
+        SELECT
+            u.id,
+            u.name,
+            u.stage_id,
+            ps.name AS stage_name
+        FROM users u
+
+        LEFT JOIN production_stages ps
+            ON ps.id =
+                u.stage_id
+
+        WHERE u.active = 1
+          AND u.id != :employee_id
+          AND u.role IN (
+              'employee',
+              'section_manager'
+          )
+
+        ORDER BY
+            u.name
+    ");
+
+$teammatesStmt->execute([
+    ':employee_id' =>
+        (int)$user['id'],
+]);
+
+$teammates =
+    $teammatesStmt->fetchAll(
+        PDO::FETCH_ASSOC
+    );
+
 ?>
 <!DOCTYPE html>
 <html lang="uk">
@@ -2525,6 +3068,111 @@ foreach (
             border: 1px solid #e5e7eb;
             border-radius: 14px;
             background: #fff;
+        }
+
+        .team-card {
+            border: 1px solid #dbe4f0;
+            background: #ffffff;
+        }
+
+        .team-card h2 {
+            margin-top: 0;
+            margin-bottom: 8px;
+        }
+
+        .team-status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 16px;
+        }
+
+        .team-dot {
+            width: 10px;
+            height: 10px;
+            flex: 0 0 10px;
+            border-radius: 50%;
+            background: #16a34a;
+        }
+
+        .team-dot.solo {
+            background: #9ca3af;
+        }
+
+        .team-members {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 10px;
+            margin: 14px 0 18px;
+        }
+
+        .team-member {
+            min-width: 160px;
+            padding: 12px 14px;
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            background: #f9fafb;
+        }
+
+        .team-member-name {
+            display: block;
+            font-weight: 700;
+        }
+
+        .team-member-share {
+            display: block;
+            margin-top: 4px;
+            color: #2563eb;
+            font-size: 18px;
+            font-weight: 700;
+        }
+
+        .team-start-form {
+            display: flex;
+            gap: 10px;
+            align-items: end;
+            flex-wrap: wrap;
+            margin-top: 16px;
+        }
+
+        .team-select-wrap {
+            flex: 1;
+            min-width: 240px;
+        }
+
+        .team-select-wrap label {
+            display: block;
+            margin-bottom: 6px;
+            font-size: 13px;
+            font-weight: 700;
+            color: #374151;
+        }
+
+        .team-select {
+            width: 100%;
+            min-height: 44px;
+            padding: 0 12px;
+            border: 1px solid #d1d5db;
+            border-radius: 8px;
+            background: #fff;
+            font-size: 15px;
+        }
+
+        .team-flash {
+            margin-bottom: 20px;
+            padding: 14px 16px;
+            border-radius: 10px;
+            font-weight: 600;
+        }
+
+        .team-flash.success {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .team-flash.error {
+            background: #fee2e2;
+            color: #991b1b;
         }
 
         .scan-description {
@@ -2770,6 +3418,230 @@ require __DIR__
         </div>
 
     </header>
+
+
+    <?php if ($teamFlash): ?>
+
+        <div
+            class="team-flash <?= e(
+                $teamFlash['type']
+                ?? 'success'
+            ) ?>"
+        >
+            <?= e(
+                $teamFlash['message']
+                ?? ''
+            ) ?>
+        </div>
+
+    <?php endif; ?>
+
+
+    <section class="card team-card">
+
+        <h2>
+            Режим роботи
+        </h2>
+
+        <?php if ($activeTeam): ?>
+
+            <div class="team-status">
+
+                <span class="team-dot"></span>
+
+                <strong>
+                    Спільна робота активна
+                </strong>
+
+            </div>
+
+            <div class="muted">
+                Дільниця:
+                <strong>
+                    <?= e(
+                        stageLabel(
+                            $currentStage['name']
+                        )
+                    ) ?>
+                </strong>
+            </div>
+
+            <div class="team-members">
+
+                <?php foreach (
+                    $activeTeamMembers
+                    as $member
+                ): ?>
+
+                    <div class="team-member">
+
+                        <span class="team-member-name">
+                            <?= e(
+                                $member['name']
+                            ) ?>
+                        </span>
+
+
+                    </div>
+
+                <?php endforeach; ?>
+
+            </div>
+
+            <div class="muted">
+                Усі нові операції на цій дільниці
+                будуть розподілятися між учасниками команди.
+            </div>
+
+            <form
+                method="post"
+                class="actions"
+            >
+
+                <input
+                    type="hidden"
+                    name="csrf_token"
+                    value="<?= e(
+                        $csrfToken
+                    ) ?>"
+                >
+
+                <input
+                    type="hidden"
+                    name="action"
+                    value="team_end"
+                >
+
+                <button
+                    type="submit"
+                    class="button button-secondary"
+                    onclick="return confirm('Завершити спільну роботу?');"
+                >
+                    Завершити спільну роботу
+                </button>
+
+            </form>
+
+        <?php else: ?>
+
+            <div class="team-status">
+
+                <span class="team-dot solo"></span>
+
+                <strong>
+                    Працюю сам
+                </strong>
+
+            </div>
+
+            <div class="muted">
+                Зараз ваші операції зараховуються вам на 100%.
+                Якщо працюєте разом — виберіть напарника.
+            </div>
+
+            <?php if ($teammates): ?>
+
+                <form
+                    method="post"
+                    class="team-start-form"
+                >
+
+                    <input
+                        type="hidden"
+                        name="csrf_token"
+                        value="<?= e(
+                            $csrfToken
+                        ) ?>"
+                    >
+
+                    <input
+                        type="hidden"
+                        name="action"
+                        value="team_start"
+                    >
+
+                    <div class="team-select-wrap">
+
+                        <label for="teammate_id">
+                            Напарник
+                        </label>
+
+                        <select
+                            name="teammate_id"
+                            id="teammate_id"
+                            class="team-select"
+                            required
+                        >
+
+                            <option value="">
+                                Оберіть працівника
+                            </option>
+
+                            <?php foreach (
+                                $teammates
+                                as $teammate
+                            ): ?>
+
+                                <option
+                                    value="<?= (int)
+                                        $teammate['id'] ?>"
+                                >
+
+                                    <?= e(
+                                        $teammate['name']
+                                    ) ?>
+
+                                    <?php if (
+                                        !empty(
+                                            $teammate[
+                                                'stage_name'
+                                            ]
+                                        )
+                                    ): ?>
+
+                                        —
+                                        <?= e(
+                                            stageLabel(
+                                                $teammate[
+                                                    'stage_name'
+                                                ]
+                                            )
+                                        ) ?>
+
+                                    <?php endif; ?>
+
+                                </option>
+
+                            <?php endforeach; ?>
+
+                        </select>
+
+                    </div>
+
+                    <button
+                        type="submit"
+                        class="button"
+                    >
+                        👥 Почати спільну роботу
+                    </button>
+
+                </form>
+
+            <?php else: ?>
+
+                <div
+                    class="muted"
+                    style="margin-top:14px;"
+                >
+                    Немає доступних працівників
+                    для спільної роботи.
+                </div>
+
+            <?php endif; ?>
+
+        <?php endif; ?>
+
+    </section>
 
 
     <section class="card">

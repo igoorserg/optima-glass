@@ -4,6 +4,7 @@ require __DIR__ . '/../src/auth.php';
 require __DIR__ . '/../src/notifications.php';
 require __DIR__ . '/../src/telegram.php';
 require __DIR__ . '/../src/permissions.php';
+require_once __DIR__ . '/../src/team_work.php';
 
 $user = require_user();
 
@@ -91,6 +92,15 @@ function writeBatchAudit(
             $_SERVER['HTTP_USER_AGENT'] ?? null,
     ]);
 }
+
+
+/*
+|--------------------------------------------------------------------------
+| Персональний виробіток для пакетної роботи
+|--------------------------------------------------------------------------
+*/
+
+
 
 /*
 |--------------------------------------------------------------------------
@@ -1120,6 +1130,9 @@ if (
                             g.current_step_id,
                             g.current_location,
                             g.route_id,
+                            g.width,
+                            g.height,
+                            g.quantity,
 
                             rs.step_number,
                             rs.name
@@ -1323,6 +1336,21 @@ if (
                         ':batch_id' =>
                             $batchId,
                     ]);
+
+                    /*
+                     * Персональний виробіток
+                     * для завершеної операції партії.
+                     */
+                    $operationId =
+                        (int)$db->lastInsertId();
+
+                    recordOperationWorkers(
+                        $db,
+                        $operationId,
+                        (int)$user['id'],
+                        (string)$glass['stage_name'],
+                        $glass
+                    );
 
                     /*
                      * Історія.

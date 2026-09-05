@@ -47,8 +47,11 @@ function statusLabel(string $status): string
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Стекла — Optima Glass</title>
+    <link rel="stylesheet" href="/assets/css/app.css?v=4">
 </head>
 <body>
+<main class="legacy-page glasses-page">
+
 
     <?php require __DIR__ . '/../src/partials/header.php'; ?>
 
@@ -130,5 +133,7 @@ function statusLabel(string $status): string
         </table>
     <?php endif; ?>
 
+
+</main>
 </body>
 </html>

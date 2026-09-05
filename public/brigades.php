@@ -1204,30 +1204,7 @@ unset($team);
     >
 
     <style>
-
-        .brigades-page {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 30px 20px 60px;
-        }
-
-        .brigades-header {
-            margin-bottom: 24px;
-        }
-
-        .brigades-header h1 {
-            margin-bottom: 6px;
-        }
-
-        .brigade-card {
-            margin-bottom: 20px;
-            padding: 22px;
-            background: #fff;
-            border: 1px solid #e5e7eb;
-            border-radius: 14px;
-        }
-
-        .brigade-top {
+.brigade-top {
             display: flex;
             gap: 15px;
             justify-content: space-between;
@@ -1254,12 +1231,7 @@ unset($team);
             display: block;
             margin-bottom: 4px;
         }
-
-        .muted {
-            color: #6b7280;
-        }
-
-        .form-row {
+.form-row {
             display: flex;
             gap: 12px;
             flex-wrap: wrap;
@@ -1285,41 +1257,7 @@ unset($team);
             border-radius: 8px;
             background: #fff;
         }
-
-        .flash {
-            margin-bottom: 20px;
-            padding: 14px 16px;
-            border-radius: 10px;
-            font-weight: 700;
-        }
-
-        .flash.success {
-            background: #dcfce7;
-            color: #166534;
-        }
-
-        .flash.error {
-            background: #fee2e2;
-            color: #991b1b;
-        }
-
-        .empty-state {
-            padding: 28px;
-            text-align: center;
-            background: #fff;
-            border: 1px dashed #d1d5db;
-            border-radius: 14px;
-            color: #6b7280;
-        }
-
-        .actions-inline {
-            display: flex;
-            gap: 8px;
-            flex-wrap: wrap;
-            margin-top: 8px;
-        }
-
-    </style>
+</style>
 
 </head>
 

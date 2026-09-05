@@ -607,109 +607,8 @@ $orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
     >
 
     <style>
-
-        .manager-page {
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 30px 20px 50px;
-        }
-
-        .manager-header {
-            margin-bottom: 25px;
-        }
-
-        .manager-header h1 {
-            margin-bottom: 8px;
-        }
-
-        .manager-stats {
-            display: grid;
-            grid-template-columns:
-                repeat(5, minmax(0, 1fr));
-            gap: 15px;
-            margin-bottom: 25px;
-        }
-
-        .manager-stat {
-            padding: 18px;
-            border: 1px solid #e5e7eb;
-            border-radius: 12px;
-            background: #fff;
-        }
-
-        .manager-stat-number {
-            display: block;
-            margin-top: 5px;
-            font-size: 26px;
-            font-weight: 700;
-        }
-
-        .manager-card {
-            margin-bottom: 24px;
-            padding: 24px;
-            border: 1px solid #e5e7eb;
-            border-radius: 14px;
-            background: #fff;
-        }
-
-        .manager-message {
-            padding: 12px 15px;
-            margin-bottom: 20px;
-            border-radius: 9px;
-        }
-
-        .manager-success {
-            background: #dcfce7;
-            color: #166534;
-        }
-
-        .manager-error {
-            background: #fee2e2;
-            color: #991b1b;
-        }
-
-        .manager-filters {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-bottom: 20px;
-        }
-
-        .manager-filters a {
-            display: inline-block;
-            padding: 8px 12px;
-            border-radius: 8px;
-            text-decoration: none;
-            border: 1px solid #e5e7eb;
-        }
-
-        .manager-filters a.active {
-            font-weight: 700;
-        }
-
-        .orders-table-wrap {
-            overflow-x: auto;
-        }
-
-        .orders-table {
-            width: 100%;
-            min-width: 1100px;
-            border-collapse: collapse;
-        }
-
-        .orders-table th,
-        .orders-table td {
-            padding: 14px 12px;
-            border-bottom: 1px solid #e5e7eb;
-            vertical-align: top;
-            text-align: left;
-        }
-
-        .orders-table th {
-            white-space: nowrap;
-        }
-
-        .order-number {
+.orders-table th,
+.order-number {
             font-weight: 700;
         }
 
@@ -730,38 +629,11 @@ $orders = $stmt->fetchAll(PDO::FETCH_ASSOC);
             width: 100%;
             padding: 7px 8px;
         }
-
-        .order-actions {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-        }
-
-        .status {
-            font-weight: 600;
-        }
-
-        .empty-state {
-            padding: 35px 15px;
-            text-align: center;
-        }
-
-        @media (max-width: 900px) {
-
-            .manager-stats {
-                grid-template-columns:
-                    repeat(2, minmax(0, 1fr));
-            }
-
-        }
+@media (max-width: 900px) {
+}
 
         @media (max-width: 600px) {
-
-            .manager-stats {
-                grid-template-columns: 1fr;
-            }
-
-        }
+}
 
     </style>
 

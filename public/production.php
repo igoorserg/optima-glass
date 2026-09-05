@@ -2380,44 +2380,7 @@ foreach ($queue as $glass) {
     </title>
 
     <style>
-
-        * {
-            box-sizing: border-box;
-        }
-
-        body {
-            margin: 0;
-            background: #f4f6f8;
-            font-family: Arial, sans-serif;
-        }
-
-        .page {
-            max-width: 1400px;
-            margin: 0 auto;
-            padding: 30px 20px 60px;
-        }
-
-        .page-header {
-            margin-bottom: 22px;
-        }
-
-        .page-header h1 {
-            margin-bottom: 7px;
-        }
-
-        .muted {
-            color: #6b7280;
-        }
-
-        .card {
-            margin-bottom: 20px;
-            padding: 22px;
-            border: 1px solid #e5e7eb;
-            border-radius: 14px;
-            background: #fff;
-        }
-
-        .message {
+.message {
             margin-bottom: 20px;
             padding: 15px;
             border-radius: 10px;
@@ -2451,47 +2414,7 @@ foreach ($queue as $glass) {
             background: #111827;
             color: #fff;
         }
-
-        .summary {
-            display: grid;
-            grid-template-columns:
-                repeat(3, minmax(0, 1fr));
-            gap: 12px;
-        }
-
-        .summary-card {
-            padding: 17px;
-            border-radius: 10px;
-            background: #f9fafb;
-        }
-
-        .summary-value {
-            display: block;
-            margin-top: 6px;
-            font-size: 25px;
-            font-weight: 700;
-        }
-
-        .mode-nav {
-            display: flex;
-            gap: 8px;
-            margin-bottom: 20px;
-        }
-
-        .mode-link {
-            padding: 9px 13px;
-            border: 1px solid #d1d5db;
-            border-radius: 8px;
-            text-decoration: none;
-            color: #111827;
-        }
-
-        .mode-link.active {
-            background: #111827;
-            color: #fff;
-        }
-
-        .order-card {
+.order-card {
             margin-bottom: 18px;
             padding: 18px;
             border: 1px solid #e5e7eb;
@@ -2547,12 +2470,7 @@ foreach ($queue as $glass) {
             color: #6b7280;
             font-size: 13px;
         }
-
-        .table-wrap {
-            overflow-x: auto;
-        }
-
-        table {
+table {
             width: 100%;
             min-width: 850px;
             border-collapse: collapse;
@@ -2575,39 +2493,7 @@ foreach ($queue as $glass) {
             margin-top: 15px;
             align-items: end;
         }
-
-        select {
-            width: 100%;
-            min-height: 42px;
-            padding: 0 10px;
-            border: 1px solid #d1d5db;
-            border-radius: 8px;
-        }
-
-        .button {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 42px;
-            padding: 0 15px;
-            border: 0;
-            border-radius: 8px;
-            cursor: pointer;
-            text-decoration: none;
-            font-weight: 700;
-        }
-
-        .button-primary {
-            background: #111827;
-            color: #fff;
-        }
-
-        .button-secondary {
-            background: #f3f4f6;
-            color: #111827;
-        }
-
-        .batch-list {
+.batch-list {
             display: grid;
             gap: 10px;
         }
@@ -2621,22 +2507,10 @@ foreach ($queue as $glass) {
             border: 1px solid #e5e7eb;
             border-radius: 10px;
         }
-
-        .empty {
-            padding: 28px 10px;
-            text-align: center;
-            color: #6b7280;
-        }
-
-        @media (
+@media (
             max-width: 800px
         ) {
-
-            .summary {
-                grid-template-columns: 1fr;
-            }
-
-            .order-header,
+.order-header,
             .batch-row {
                 flex-direction: column;
                 align-items: stretch;

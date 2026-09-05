@@ -99,9 +99,12 @@ $stages = $stmt->fetchAll();
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
 
     <title>Производственные этапы — Optima Glass</title>
+    <link rel="stylesheet" href="/assets/css/app.css?v=4">
 </head>
 
 <body>
+<main class="legacy-page admin-page">
+
 
 <?php require __DIR__ . '/../../src/partials/header.php'; ?>
 
@@ -256,5 +259,7 @@ $stages = $stmt->fetchAll();
 
 </table>
 
+
+</main>
 </body>
 </html>

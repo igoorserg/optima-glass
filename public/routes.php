@@ -490,28 +490,6 @@ require __DIR__
 ?>
 
 <style>
-.routes-page {
-    max-width: 1400px;
-    margin: 0 auto;
-    padding: 24px;
-}
-
-.routes-grid {
-    display: grid;
-    grid-template-columns:
-        minmax(320px, 420px)
-        minmax(0, 1fr);
-    gap: 24px;
-    align-items: start;
-}
-
-.routes-card {
-    background: #fff;
-    border: 1px solid #e5e7eb;
-    border-radius: 14px;
-    padding: 20px;
-}
-
 .routes-title {
     margin: 0 0 18px;
 }
@@ -585,47 +563,9 @@ require __DIR__
 .route-actions {
     margin-top: 12px;
 }
-
-.button {
-    display: inline-block;
-    border: 0;
-    border-radius: 8px;
-    padding: 9px 14px;
-    cursor: pointer;
-    background: #2563eb;
-    color: white;
-    font-weight: 600;
-}
-
-.button-secondary {
-    background: #e5e7eb;
-    color: #111827;
-}
-
-.message {
-    padding: 12px 14px;
-    border-radius: 9px;
-    margin-bottom: 16px;
-}
-
-.message-success {
-    background: #ecfdf5;
-}
-
-.message-error {
-    background: #fef2f2;
-}
-
-.muted {
-    color: #6b7280;
-}
-
 @media (
     max-width: 900px
 ) {
-    .routes-grid {
-        grid-template-columns: 1fr;
-    }
 }
 </style>
 

@@ -3607,44 +3607,7 @@ unset($assignment);
     </title>
 
     <style>
-
-        * {
-            box-sizing: border-box;
-        }
-
-        body {
-            margin: 0;
-            background: #f4f6f8;
-            font-family: Arial, sans-serif;
-        }
-
-        .work-page {
-            max-width: 1200px;
-            margin: 0 auto;
-            padding: 30px 20px 60px;
-        }
-
-        .work-header {
-            margin-bottom: 25px;
-        }
-
-        .work-header h1 {
-            margin-bottom: 6px;
-        }
-
-        .muted {
-            color: #6b7280;
-        }
-
-        .card {
-            margin-bottom: 22px;
-            padding: 24px;
-            border: 1px solid #e5e7eb;
-            border-radius: 14px;
-            background: #fff;
-        }
-
-        .team-card {
+.team-card {
             border: 1px solid #dbe4f0;
             background: #ffffff;
         }
@@ -3653,27 +3616,7 @@ unset($assignment);
             margin-top: 0;
             margin-bottom: 8px;
         }
-
-        .team-status {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            margin-bottom: 16px;
-        }
-
-        .team-dot {
-            width: 10px;
-            height: 10px;
-            flex: 0 0 10px;
-            border-radius: 50%;
-            background: #16a34a;
-        }
-
-        .team-dot.solo {
-            background: #9ca3af;
-        }
-
-        .team-members {
+.team-members {
             display: flex;
             flex-wrap: wrap;
             gap: 10px;
@@ -3713,79 +3656,12 @@ unset($assignment);
             font-weight: 700;
             color: #374151;
         }
-
-        .team-select {
-            width: 100%;
-            min-height: 44px;
-            padding: 0 12px;
-            border: 1px solid #d1d5db;
-            border-radius: 8px;
-            background: #fff;
-            font-size: 15px;
-        }
-
-        .team-flash {
-            margin-bottom: 20px;
-            padding: 14px 16px;
-            border-radius: 10px;
-            font-weight: 600;
-        }
-
-        .team-flash.success {
-            background: #dcfce7;
-            color: #166534;
-        }
-
-        .team-flash.error {
-            background: #fee2e2;
-            color: #991b1b;
-        }
-
-        .scan-description {
+.scan-description {
             color: #6b7280;
             margin-bottom: 18px;
             line-height: 1.5;
         }
-
-        .scan-form {
-            display: flex;
-            gap: 10px;
-        }
-
-        .scan-input {
-            flex: 1;
-            min-height: 56px;
-            padding: 0 15px;
-            border: 1px solid #d1d5db;
-            border-radius: 9px;
-            font-size: 18px;
-        }
-
-        .button {
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            min-height: 44px;
-            padding: 0 16px;
-            border: 0;
-            border-radius: 8px;
-            background: #111827;
-            color: #fff;
-            text-decoration: none;
-            cursor: pointer;
-            font-weight: 700;
-        }
-
-        .button-secondary {
-            background: #f3f4f6;
-            color: #111827;
-        }
-
-        .button-danger {
-            background: #b91c1c;
-        }
-
-        .scan-result {
+.scan-result {
             margin-bottom: 20px;
             padding: 18px;
             border-radius: 10px;
@@ -3837,28 +3713,7 @@ unset($assignment);
             font-size: 21px;
             font-weight: 700;
         }
-
-        .summary {
-            display: grid;
-            grid-template-columns:
-                repeat(3, 1fr);
-            gap: 12px;
-        }
-
-        .summary-box {
-            padding: 16px;
-            border-radius: 10px;
-            background: #f9fafb;
-        }
-
-        .summary-value {
-            display: block;
-            margin-top: 5px;
-            font-size: 24px;
-            font-weight: 700;
-        }
-
-        .batch-list {
+.batch-list {
             display: grid;
             gap: 10px;
         }
@@ -3882,12 +3737,7 @@ unset($assignment);
             color: #6b7280;
             font-size: 13px;
         }
-
-        .table-wrap {
-            overflow-x: auto;
-        }
-
-        table {
+table {
             width: 100%;
             min-width: 900px;
             border-collapse: collapse;
@@ -3900,29 +3750,10 @@ unset($assignment);
             text-align: left;
             vertical-align: top;
         }
-
-        .empty {
-            padding: 25px 10px;
-            text-align: center;
-            color: #6b7280;
-        }
-
-        .actions {
-            display: flex;
-            gap: 10px;
-            flex-wrap: wrap;
-            margin-top: 18px;
-        }
-
-        @media (
+@media (
             max-width: 750px
         ) {
-
-            .scan-form {
-                flex-direction: column;
-            }
-
-            .summary,
+.summary,
             .order-preview-grid {
                 grid-template-columns: 1fr 1fr;
             }

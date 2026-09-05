@@ -90,7 +90,6 @@ if (!function_exists('headerMenuItem')) {
         );
 
         ?>
-<link rel="stylesheet" href="/assets/css/app.css">
 
         <a
             href="<?= htmlspecialchars(
@@ -118,6 +117,8 @@ if (!function_exists('headerMenuItem')) {
 
 
 
+<link rel="stylesheet" href="/assets/css/app.css?v=4">
+
 <header class="app-header">
 
     <div class="app-header-inner">
@@ -130,6 +131,21 @@ if (!function_exists('headerMenuItem')) {
             >
                 OPTIMA GLASS
             </a>
+
+            <?php if ($headerUser): ?>
+
+                <button
+                    type="button"
+                    class="mobile-menu-button"
+                    id="mobile-menu-button"
+                    aria-label="Відкрити меню"
+                    aria-controls="app-nav"
+                    aria-expanded="false"
+                >
+                    Меню
+                </button>
+
+            <?php endif; ?>
 
 
             <?php if ($headerUser): ?>
@@ -180,7 +196,7 @@ if (!function_exists('headerMenuItem')) {
 
         <?php if ($headerUser): ?>
 
-            <nav class="app-nav">
+            <nav class="app-nav" id="app-nav">
 
                 <?php
 
@@ -724,5 +740,91 @@ if (!function_exists('headerMenuItem')) {
         <?php endif; ?>
 
     </div>
+
+
+<script>
+/* OPTIMA GLASS MOBILE MENU */
+(function () {
+
+    const button =
+        document.getElementById(
+            'mobile-menu-button'
+        );
+
+    const nav =
+        document.getElementById(
+            'app-nav'
+        );
+
+    if (!button || !nav) {
+        return;
+    }
+
+    function closeMenu() {
+        document.documentElement
+            .classList
+            .remove('nav-open');
+
+        button.setAttribute(
+            'aria-expanded',
+            'false'
+        );
+    }
+
+    button.addEventListener(
+        'click',
+        function () {
+
+            const opened =
+                document.documentElement
+                    .classList
+                    .toggle('nav-open');
+
+            button.setAttribute(
+                'aria-expanded',
+                opened
+                    ? 'true'
+                    : 'false'
+            );
+        }
+    );
+
+    nav.querySelectorAll('a')
+        .forEach(function (link) {
+
+            link.addEventListener(
+                'click',
+                closeMenu
+            );
+        });
+
+    document.addEventListener(
+        'keydown',
+        function (event) {
+
+            if (
+                event.key
+                === 'Escape'
+            ) {
+                closeMenu();
+            }
+        }
+    );
+
+    window.addEventListener(
+        'resize',
+        function () {
+
+            if (
+                window.innerWidth
+                > 768
+            ) {
+                closeMenu();
+            }
+        }
+    );
+
+})();
+</script>
 
 </header>

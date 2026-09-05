@@ -18,7 +18,7 @@ function roleLabel(string $role): string
         'superadmin'      => 'Суперадміністратор',
         'admin'           => 'Адміністратор',
         'manager'         => 'Менеджер',
-        'section_manager' => 'Начальник дільниці',
+        'section_manager' => 'Майстер дільниці',
         'employee'        => 'Працівник',
         default           => $role,
     };

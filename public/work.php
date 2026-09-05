@@ -157,6 +157,23 @@ $canCompleteOrderStage =
         $user
     );
 
+/*
+|--------------------------------------------------------------------------
+| Менеджер
+|--------------------------------------------------------------------------
+|
+| Сторінка work.php призначена для працівника та майстра дільниці.
+| Менеджер працює із замовленнями через manager.php.
+|
+*/
+
+if (
+    ($user['role'] ?? '') === 'manager'
+) {
+    header('Location: /manager.php');
+    exit;
+}
+
 $stageId =
     current_stage_id(
         $user
@@ -363,255 +380,235 @@ if (
     |--------------------------------------------------------------------------
     */
 
-    if (
-        $action === 'team_start'
-    ) {
+    /*
+    |--------------------------------------------------------------------------
+    | Бригади
+    |--------------------------------------------------------------------------
+    |
+    | Бригада завжди належить конкретній дільниці.
+    |
+    | Працівник може створити бригаду тільки на своїй дільниці.
+    | Майстер дільниці також працює тільки в межах своєї stage_id.
+    |
+    | Працівників з інших дільниць дозволено додавати до бригади.
+    | Підтвердження запрошеного працівника не потрібне.
+    |
+    | При зміні складу поточна work_session закривається,
+    | а нова відкривається з новим складом. Завдяки цьому
+    | історичний виробіток не перераховується.
+    |
+    */
 
-        $teammateId =
-            (int) (
-                $_POST['teammate_id']
-                ?? 0
-            );
-
-        if (
-            $teammateId <= 0
-            ||
-            $teammateId ===
-                (int)$user['id']
-        ) {
-
-            $_SESSION['team_flash'] = [
-                'type' => 'error',
-                'message' => 'Оберіть напарника.',
-            ];
-
-            header('Location: /work.php');
-            exit;
-        }
+    if ($action === 'team_start') {
 
         try {
+
+            $ownerId = (int)$user['id'];
+            $teamStageId = (int)$stageId;
+
+            if ($teamStageId <= 0) {
+                throw new RuntimeException(
+                    'Для створення бригади необхідно бути закріпленим за дільницею.'
+                );
+            }
+
+            if (!can_access_stage($teamStageId, $user)) {
+                throw new RuntimeException(
+                    'Ви не можете створювати бригаду на цій дільниці.'
+                );
+            }
+
+            $memberIds = $_POST['member_ids'] ?? [];
+
+            if (!is_array($memberIds)) {
+                $memberIds = [];
+            }
+
+            $memberIds = array_values(
+                array_unique(
+                    array_filter(
+                        array_map(
+                            static fn($id) => (int)$id,
+                            $memberIds
+                        ),
+                        static fn($id) => $id > 0
+                    )
+                )
+            );
+
+            /*
+             * Власник бригади завжди входить до складу.
+             */
+
+            if (!in_array($ownerId, $memberIds, true)) {
+                array_unshift($memberIds, $ownerId);
+            }
+
+            if (count($memberIds) < 2) {
+                throw new RuntimeException(
+                    'Для бригади потрібно щонайменше два працівники.'
+                );
+            }
 
             $db->beginTransaction();
 
             /*
-             * Перевіряємо напарника.
+             * Перевіряємо всіх учасників.
              */
 
-            $teammateStmt =
-                $db->prepare("
-                    SELECT
-                        id,
-                        name,
-                        active
-                    FROM users
-                    WHERE id = :id
-                      AND active = 1
-                      AND role IN (
-                          'employee',
-                          'section_manager'
-                      )
-                    LIMIT 1
-                ");
+            $placeholders = implode(
+                ',',
+                array_fill(0, count($memberIds), '?')
+            );
 
-            $teammateStmt->execute([
-                ':id' => $teammateId,
-            ]);
+            $membersStmt = $db->prepare("
+                SELECT
+                    id,
+                    name,
+                    stage_id,
+                    role,
+                    active
+                FROM users
+                WHERE id IN ($placeholders)
+                  AND active = 1
+                  AND role IN (
+                      'employee',
+                      'section_manager'
+                  )
+            ");
 
-            $teammate =
-                $teammateStmt->fetch(
-                    PDO::FETCH_ASSOC
-                );
+            $membersStmt->execute($memberIds);
 
-            if (!$teammate) {
+            $validMembers = $membersStmt->fetchAll(
+                PDO::FETCH_ASSOC
+            );
 
+            $validIds = array_map(
+                static fn(array $row): int => (int)$row['id'],
+                $validMembers
+            );
+
+            sort($validIds);
+
+            $expectedIds = $memberIds;
+            sort($expectedIds);
+
+            if ($validIds !== $expectedIds) {
                 throw new RuntimeException(
-                    'Напарника не знайдено або він неактивний.'
+                    'Один або декілька обраних працівників недоступні.'
                 );
             }
 
             /*
-             * Поточний працівник не повинен бути
-             * учасником іншої активної команди.
+             * Один працівник не може одночасно входити
+             * до двох різних активних бригад НА ОДНІЙ ДІЛЬНИЦІ.
+             *
+             * На іншій дільниці участь допускається.
              */
 
-            $busySelfStmt =
-                $db->prepare("
-                    SELECT
-                        ws.id
-                    FROM work_sessions ws
+            $busyStmt = $db->prepare("
+                SELECT
+                    u.name,
+                    ws.id
+                FROM work_sessions ws
 
-                    JOIN work_session_members wsm
-                        ON wsm.work_session_id = ws.id
+                JOIN work_session_members wsm
+                    ON wsm.work_session_id = ws.id
 
-                    WHERE ws.active = 1
-                      AND ws.mode = 'team'
-                      AND wsm.employee_id = :employee_id
+                JOIN users u
+                    ON u.id = wsm.employee_id
 
-                    LIMIT 1
-                ");
+                WHERE ws.active = 1
+                  AND ws.mode = 'team'
+                  AND ws.stage_id = ?
+                  AND wsm.employee_id IN ($placeholders)
 
-            $busySelfStmt->execute([
-                ':employee_id' =>
-                    (int)$user['id'],
-            ]);
+                LIMIT 1
+            ");
 
-            $busySelfSession =
-                $busySelfStmt->fetchColumn();
+            $busyStmt->execute(
+                array_merge(
+                    [$teamStageId],
+                    $memberIds
+                )
+            );
 
-            if (
-                $busySelfSession !== false
-            ) {
+            $busy = $busyStmt->fetch(PDO::FETCH_ASSOC);
 
+            if ($busy) {
                 throw new RuntimeException(
-                    'Ви вже перебуваєте в активній спільній роботі. Спочатку завершіть її.'
+                    'Працівник '
+                    . $busy['name']
+                    . ' вже входить до іншої активної бригади на цій дільниці.'
                 );
             }
 
-            /*
-             * Напарник теж не повинен одночасно
-             * перебувати в іншій активній команді.
-             */
-
-            $busyTeammateStmt =
-                $db->prepare("
-                    SELECT
-                        ws.id
-                    FROM work_sessions ws
-
-                    JOIN work_session_members wsm
-                        ON wsm.work_session_id = ws.id
-
-                    WHERE ws.active = 1
-                      AND ws.mode = 'team'
-                      AND wsm.employee_id = :employee_id
-
-                    LIMIT 1
-                ");
-
-            $busyTeammateStmt->execute([
-                ':employee_id' =>
-                    $teammateId,
-            ]);
-
-            $busyTeammateSession =
-                $busyTeammateStmt->fetchColumn();
-
-            if (
-                $busyTeammateSession !== false
-            ) {
-
-                throw new RuntimeException(
-                    'Обраний працівник уже бере участь в іншій активній команді.'
-                );
-            }
-
-            /*
-             * Створюємо активну команду
-             * на поточній дільниці.
-             */
-
-            $sessionStmt =
-                $db->prepare("
-                    INSERT INTO work_sessions (
-                        owner_employee_id,
-                        stage_id,
-                        mode,
-                        active,
-                        started_at,
-                        created_at,
-                        updated_at
-                    )
-                    VALUES (
-                        :owner_employee_id,
-                        :stage_id,
-                        'team',
-                        1,
-                        CURRENT_TIMESTAMP,
-                        CURRENT_TIMESTAMP,
-                        CURRENT_TIMESTAMP
-                    )
-                ");
+            $sessionStmt = $db->prepare("
+                INSERT INTO work_sessions (
+                    owner_employee_id,
+                    stage_id,
+                    mode,
+                    active,
+                    started_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    :owner_employee_id,
+                    :stage_id,
+                    'team',
+                    1,
+                    CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP
+                )
+            ");
 
             $sessionStmt->execute([
-                ':owner_employee_id' =>
-                    (int)$user['id'],
-
-                ':stage_id' =>
-                    $stageId,
+                ':owner_employee_id' => $ownerId,
+                ':stage_id' => $teamStageId,
             ]);
 
-            $workSessionId =
-                (int)$db->lastInsertId();
+            $sessionId = (int)$db->lastInsertId();
 
             /*
-             * Власник команди — 50%.
+             * Внутрішньо ділимо виробіток порівну.
+             * Працівникам проценти в інтерфейсі не показуємо.
              */
 
-            $memberStmt =
-                $db->prepare("
-                    INSERT INTO work_session_members (
-                        work_session_id,
-                        employee_id,
-                        share_percent
-                    )
-                    VALUES (
-                        :work_session_id,
-                        :employee_id,
-                        :share_percent
-                    )
-                ");
+            $share = 100 / count($memberIds);
 
-            $memberStmt->execute([
-                ':work_session_id' =>
-                    $workSessionId,
+            $insertMember = $db->prepare("
+                INSERT INTO work_session_members (
+                    work_session_id,
+                    employee_id,
+                    share_percent
+                )
+                VALUES (
+                    :session_id,
+                    :employee_id,
+                    :share_percent
+                )
+            ");
 
-                ':employee_id' =>
-                    (int)$user['id'],
-
-                ':share_percent' =>
-                    50,
-            ]);
-
-            /*
-             * Напарник — 50%.
-             */
-
-            $memberStmt->execute([
-                ':work_session_id' =>
-                    $workSessionId,
-
-                ':employee_id' =>
-                    $teammateId,
-
-                ':share_percent' =>
-                    50,
-            ]);
+            foreach ($memberIds as $memberId) {
+                $insertMember->execute([
+                    ':session_id' => $sessionId,
+                    ':employee_id' => $memberId,
+                    ':share_percent' => $share,
+                ]);
+            }
 
             writeAudit(
                 $db,
-                (int)$user['id'],
+                $ownerId,
                 'team_work_started',
                 'work_session',
-                $workSessionId,
+                $sessionId,
                 null,
                 [
-                    'stage_id' =>
-                        $stageId,
-
-                    'members' => [
-                        [
-                            'employee_id' =>
-                                (int)$user['id'],
-                            'share_percent' =>
-                                50,
-                        ],
-                        [
-                            'employee_id' =>
-                                $teammateId,
-                            'share_percent' =>
-                                50,
-                        ],
-                    ],
+                    'stage_id' => $teamStageId,
+                    'member_ids' => $memberIds,
                 ]
             );
 
@@ -620,10 +617,8 @@ if (
             $_SESSION['team_flash'] = [
                 'type' => 'success',
                 'message' =>
-                    'Спільну роботу розпочато: '
-                    . ($user['name'] ?? 'Працівник')
-                    . ' + '
-                    . $teammate['name']
+                    'Бригаду створено. Учасників: '
+                    . count($memberIds)
                     . '.',
             ];
 
@@ -635,8 +630,7 @@ if (
 
             $_SESSION['team_flash'] = [
                 'type' => 'error',
-                'message' =>
-                    $exception->getMessage(),
+                'message' => $exception->getMessage(),
             ];
         }
 
@@ -644,71 +638,292 @@ if (
         exit;
     }
 
+
     if (
-        $action === 'team_end'
+        $action === 'team_add_member'
+        ||
+        $action === 'team_remove_member'
     ) {
 
         try {
 
-            $db->beginTransaction();
-
-            $activeStmt =
-                $db->prepare("
-                    SELECT id
-                    FROM work_sessions
-                    WHERE owner_employee_id =
-                        :owner_employee_id
-                      AND active = 1
-                      AND mode = 'team'
-                    ORDER BY id DESC
-                    LIMIT 1
-                ");
-
-            $activeStmt->execute([
-                ':owner_employee_id' =>
-                    (int)$user['id'],
-            ]);
-
             $sessionId =
-                $activeStmt->fetchColumn();
+                (int)($_POST['session_id'] ?? 0);
 
-            if (
-                $sessionId === false
-            ) {
+            $changedMemberId =
+                (int)($_POST['employee_id'] ?? 0);
 
+            if ($sessionId <= 0 || $changedMemberId <= 0) {
                 throw new RuntimeException(
-                    'Активної спільної роботи не знайдено.'
+                    'Некоректні дані бригади.'
                 );
             }
 
-            $endStmt =
-                $db->prepare("
-                    UPDATE work_sessions
-                    SET
-                        active = 0,
-                        ended_at =
-                            CURRENT_TIMESTAMP,
-                        updated_at =
-                            CURRENT_TIMESTAMP
+            $db->beginTransaction();
+
+            $sessionStmt = $db->prepare("
+                SELECT
+                    id,
+                    owner_employee_id,
+                    stage_id
+                FROM work_sessions
+                WHERE id = :id
+                  AND active = 1
+                  AND mode = 'team'
+                LIMIT 1
+            ");
+
+            $sessionStmt->execute([
+                ':id' => $sessionId,
+            ]);
+
+            $session = $sessionStmt->fetch(
+                PDO::FETCH_ASSOC
+            );
+
+            if (!$session) {
+                throw new RuntimeException(
+                    'Активну бригаду не знайдено.'
+                );
+            }
+
+            $sessionStageId =
+                (int)$session['stage_id'];
+
+            $isOwner =
+                (int)$session['owner_employee_id']
+                === (int)$user['id'];
+
+            $isStageManager =
+                is_section_manager($user)
+                &&
+                current_stage_id($user)
+                === $sessionStageId;
+
+            if (!$isOwner && !$isStageManager) {
+                throw new RuntimeException(
+                    'Ви не можете змінювати склад цієї бригади.'
+                );
+            }
+
+            $memberStmt = $db->prepare("
+                SELECT
+                    wsm.employee_id,
+                    u.name
+                FROM work_session_members wsm
+                JOIN users u
+                    ON u.id = wsm.employee_id
+                WHERE wsm.work_session_id = :session_id
+                ORDER BY wsm.id
+            ");
+
+            $memberStmt->execute([
+                ':session_id' => $sessionId,
+            ]);
+
+            $currentMembers =
+                $memberStmt->fetchAll(PDO::FETCH_ASSOC);
+
+            $currentIds = array_map(
+                static fn(array $row): int =>
+                    (int)$row['employee_id'],
+                $currentMembers
+            );
+
+            $newIds = $currentIds;
+
+            if ($action === 'team_add_member') {
+
+                $employeeStmt = $db->prepare("
+                    SELECT id, name
+                    FROM users
                     WHERE id = :id
+                      AND active = 1
+                      AND role IN (
+                          'employee',
+                          'section_manager'
+                      )
+                    LIMIT 1
                 ");
 
-            $endStmt->execute([
-                ':id' =>
-                    (int)$sessionId,
+                $employeeStmt->execute([
+                    ':id' => $changedMemberId,
+                ]);
+
+                $employee =
+                    $employeeStmt->fetch(PDO::FETCH_ASSOC);
+
+                if (!$employee) {
+                    throw new RuntimeException(
+                        'Працівника не знайдено.'
+                    );
+                }
+
+                if (in_array(
+                    $changedMemberId,
+                    $newIds,
+                    true
+                )) {
+                    throw new RuntimeException(
+                        'Працівник уже входить до цієї бригади.'
+                    );
+                }
+
+                $busyStmt = $db->prepare("
+                    SELECT ws.id
+                    FROM work_sessions ws
+
+                    JOIN work_session_members wsm
+                        ON wsm.work_session_id = ws.id
+
+                    WHERE ws.active = 1
+                      AND ws.mode = 'team'
+                      AND ws.stage_id = :stage_id
+                      AND ws.id != :session_id
+                      AND wsm.employee_id = :employee_id
+
+                    LIMIT 1
+                ");
+
+                $busyStmt->execute([
+                    ':stage_id' => $sessionStageId,
+                    ':session_id' => $sessionId,
+                    ':employee_id' => $changedMemberId,
+                ]);
+
+                if ($busyStmt->fetchColumn() !== false) {
+                    throw new RuntimeException(
+                        'Працівник уже входить до іншої бригади на цій дільниці.'
+                    );
+                }
+
+                $newIds[] = $changedMemberId;
+
+            } else {
+
+                /*
+                 * Власника не видаляємо через кнопку.
+                 * Якщо власник припиняє роботу — бригада завершується.
+                 */
+
+                if (
+                    $changedMemberId
+                    === (int)$session['owner_employee_id']
+                ) {
+                    throw new RuntimeException(
+                        'Власника бригади неможливо видалити. Завершіть бригаду.'
+                    );
+                }
+
+                $newIds = array_values(
+                    array_filter(
+                        $newIds,
+                        static fn(int $id): bool =>
+                            $id !== $changedMemberId
+                    )
+                );
+
+                if (count($newIds) < 2) {
+                    throw new RuntimeException(
+                        'Після видалення залишиться один працівник. У такому випадку завершіть бригаду.'
+                    );
+                }
+            }
+
+            /*
+             * Закриваємо стару версію складу.
+             */
+
+            $closeStmt = $db->prepare("
+                UPDATE work_sessions
+                SET
+                    active = 0,
+                    ended_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = :id
+            ");
+
+            $closeStmt->execute([
+                ':id' => $sessionId,
             ]);
+
+            /*
+             * Створюємо нову версію тієї ж бригади.
+             */
+
+            $newSessionStmt = $db->prepare("
+                INSERT INTO work_sessions (
+                    owner_employee_id,
+                    stage_id,
+                    mode,
+                    active,
+                    started_at,
+                    created_at,
+                    updated_at
+                )
+                VALUES (
+                    :owner_id,
+                    :stage_id,
+                    'team',
+                    1,
+                    CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP,
+                    CURRENT_TIMESTAMP
+                )
+            ");
+
+            $newSessionStmt->execute([
+                ':owner_id' =>
+                    (int)$session['owner_employee_id'],
+                ':stage_id' =>
+                    $sessionStageId,
+            ]);
+
+            $newSessionId =
+                (int)$db->lastInsertId();
+
+            $share = 100 / count($newIds);
+
+            $insertMember = $db->prepare("
+                INSERT INTO work_session_members (
+                    work_session_id,
+                    employee_id,
+                    share_percent
+                )
+                VALUES (
+                    :session_id,
+                    :employee_id,
+                    :share_percent
+                )
+            ");
+
+            foreach ($newIds as $memberId) {
+                $insertMember->execute([
+                    ':session_id' =>
+                        $newSessionId,
+                    ':employee_id' =>
+                        $memberId,
+                    ':share_percent' =>
+                        $share,
+                ]);
+            }
 
             writeAudit(
                 $db,
                 (int)$user['id'],
-                'team_work_ended',
+                $action === 'team_add_member'
+                    ? 'team_member_added'
+                    : 'team_member_removed',
                 'work_session',
-                (int)$sessionId,
+                $newSessionId,
                 [
-                    'active' => 1,
+                    'previous_session_id' => $sessionId,
+                    'member_ids' => $currentIds,
                 ],
                 [
-                    'active' => 0,
+                    'member_ids' => $newIds,
+                    'changed_employee_id' =>
+                        $changedMemberId,
                 ]
             );
 
@@ -717,7 +932,9 @@ if (
             $_SESSION['team_flash'] = [
                 'type' => 'success',
                 'message' =>
-                    'Спільну роботу завершено. Тепер ваш виробіток знову рахується 100% вам.',
+                    $action === 'team_add_member'
+                        ? 'Працівника додано до бригади.'
+                        : 'Працівника виведено з бригади.',
             ];
 
         } catch (Throwable $exception) {
@@ -728,8 +945,111 @@ if (
 
             $_SESSION['team_flash'] = [
                 'type' => 'error',
+                'message' => $exception->getMessage(),
+            ];
+        }
+
+        header('Location: /work.php');
+        exit;
+    }
+
+
+    if ($action === 'team_end') {
+
+        try {
+
+            $sessionId =
+                (int)($_POST['session_id'] ?? 0);
+
+            if ($sessionId <= 0) {
+                throw new RuntimeException(
+                    'Некоректний ID бригади.'
+                );
+            }
+
+            $db->beginTransaction();
+
+            $activeStmt = $db->prepare("
+                SELECT
+                    id,
+                    owner_employee_id,
+                    stage_id
+                FROM work_sessions
+                WHERE id = :id
+                  AND active = 1
+                  AND mode = 'team'
+                LIMIT 1
+            ");
+
+            $activeStmt->execute([
+                ':id' => $sessionId,
+            ]);
+
+            $session =
+                $activeStmt->fetch(PDO::FETCH_ASSOC);
+
+            if (!$session) {
+                throw new RuntimeException(
+                    'Активної бригади не знайдено.'
+                );
+            }
+
+            $isOwner =
+                (int)$session['owner_employee_id']
+                === (int)$user['id'];
+
+            $isStageManager =
+                is_section_manager($user)
+                &&
+                current_stage_id($user)
+                === (int)$session['stage_id'];
+
+            if (!$isOwner && !$isStageManager) {
+                throw new RuntimeException(
+                    'Ви не можете завершити цю бригаду.'
+                );
+            }
+
+            $endStmt = $db->prepare("
+                UPDATE work_sessions
+                SET
+                    active = 0,
+                    ended_at = CURRENT_TIMESTAMP,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE id = :id
+            ");
+
+            $endStmt->execute([
+                ':id' => $sessionId,
+            ]);
+
+            writeAudit(
+                $db,
+                (int)$user['id'],
+                'team_work_ended',
+                'work_session',
+                $sessionId,
+                ['active' => 1],
+                ['active' => 0]
+            );
+
+            $db->commit();
+
+            $_SESSION['team_flash'] = [
+                'type' => 'success',
                 'message' =>
-                    $exception->getMessage(),
+                    'Бригаду завершено.',
+            ];
+
+        } catch (Throwable $exception) {
+
+            if ($db->inTransaction()) {
+                $db->rollBack();
+            }
+
+            $_SESSION['team_flash'] = [
+                'type' => 'error',
+                'message' => $exception->getMessage(),
             ];
         }
 
@@ -2906,7 +3226,7 @@ foreach (
 
 /*
 |--------------------------------------------------------------------------
-| Активна спільна робота
+| Активна бригада
 |--------------------------------------------------------------------------
 */
 
@@ -2914,61 +3234,83 @@ $teamFlash =
     $_SESSION['team_flash']
     ?? null;
 
-unset(
-    $_SESSION['team_flash']
-);
+unset($_SESSION['team_flash']);
 
 $activeTeam = null;
 $activeTeamMembers = [];
 
-$activeTeamStmt =
-    $db->prepare("
-        SELECT
-            ws.id,
-            ws.stage_id,
-            ws.started_at
-        FROM work_sessions ws
-        WHERE ws.owner_employee_id =
-            :employee_id
-          AND ws.active = 1
-          AND ws.mode = 'team'
-        ORDER BY ws.id DESC
-        LIMIT 1
-    ");
+/*
+ * На сторінці працівника показуємо активну бригаду
+ * його поточної дільниці, до якої він входить.
+ *
+ * Для власника також спрацює цей самий запит,
+ * оскільки власник завжди є учасником.
+ */
+
+$activeTeamStmt = $db->prepare("
+    SELECT
+        ws.id,
+        ws.owner_employee_id,
+        ws.stage_id,
+        ws.started_at,
+        owner.name AS owner_name
+    FROM work_sessions ws
+
+    JOIN work_session_members mine
+        ON mine.work_session_id = ws.id
+       AND mine.employee_id = :employee_id
+
+    JOIN users owner
+        ON owner.id = ws.owner_employee_id
+
+    WHERE ws.active = 1
+      AND ws.mode = 'team'
+      AND ws.stage_id = :stage_id
+
+    ORDER BY ws.id DESC
+    LIMIT 1
+");
 
 $activeTeamStmt->execute([
-    ':employee_id' =>
-        (int)$user['id'],
+    ':employee_id' => (int)$user['id'],
+    ':stage_id' => (int)$stageId,
 ]);
 
 $activeTeam =
-    $activeTeamStmt->fetch(
-        PDO::FETCH_ASSOC
-    );
+    $activeTeamStmt->fetch(PDO::FETCH_ASSOC);
 
 if ($activeTeam) {
 
-    $activeTeamMembersStmt =
-        $db->prepare("
-            SELECT
-                u.id,
-                u.name,
-                wsm.share_percent
-            FROM work_session_members wsm
+    $activeTeamMembersStmt = $db->prepare("
+        SELECT
+            u.id,
+            u.name,
+            u.stage_id,
+            ps.name AS stage_name
+        FROM work_session_members wsm
 
-            JOIN users u
-                ON u.id =
-                    wsm.employee_id
+        JOIN users u
+            ON u.id = wsm.employee_id
 
-            WHERE wsm.work_session_id =
-                :session_id
+        LEFT JOIN production_stages ps
+            ON ps.id = u.stage_id
 
-            ORDER BY wsm.id
-        ");
+        WHERE wsm.work_session_id =
+            :session_id
+
+        ORDER BY
+            CASE
+                WHEN u.id = :owner_id THEN 0
+                ELSE 1
+            END,
+            u.name
+    ");
 
     $activeTeamMembersStmt->execute([
         ':session_id' =>
             (int)$activeTeam['id'],
+        ':owner_id' =>
+            (int)$activeTeam['owner_employee_id'],
     ]);
 
     $activeTeamMembers =
@@ -2977,33 +3319,35 @@ if ($activeTeam) {
         );
 }
 
+
 /*
- * Працівники, яких можна обрати напарниками.
+ * Працівники, яких можна запросити до бригади.
+ *
+ * Вони можуть бути закріплені за будь-якою дільницею.
  */
 
-$teammatesStmt =
-    $db->prepare("
-        SELECT
-            u.id,
-            u.name,
-            u.stage_id,
-            ps.name AS stage_name
-        FROM users u
+$teammatesStmt = $db->prepare("
+    SELECT
+        u.id,
+        u.name,
+        u.stage_id,
+        ps.name AS stage_name
+    FROM users u
 
-        LEFT JOIN production_stages ps
-            ON ps.id =
-                u.stage_id
+    LEFT JOIN production_stages ps
+        ON ps.id = u.stage_id
 
-        WHERE u.active = 1
-          AND u.id != :employee_id
-          AND u.role IN (
-              'employee',
-              'section_manager'
-          )
+    WHERE u.active = 1
+      AND u.id != :employee_id
+      AND u.role IN (
+          'employee',
+          'section_manager'
+      )
 
-        ORDER BY
-            u.name
-    ");
+    ORDER BY
+        ps.name,
+        u.name
+");
 
 $teammatesStmt->execute([
     ':employee_id' =>
@@ -3011,11 +3355,241 @@ $teammatesStmt->execute([
 ]);
 
 $teammates =
-    $teammatesStmt->fetchAll(
+    $teammatesStmt->fetchAll(PDO::FETCH_ASSOC);
+
+$currentTeamMemberIds = array_map(
+    static fn(array $member): int =>
+        (int)$member['id'],
+    $activeTeamMembers
+);
+
+$canManageActiveTeam = false;
+
+if ($activeTeam) {
+
+    $canManageActiveTeam =
+        (int)$activeTeam['owner_employee_id']
+        === (int)$user['id']
+        ||
+        (
+            is_section_manager($user)
+            &&
+            current_stage_id($user)
+            === (int)$activeTeam['stage_id']
+        );
+}
+
+
+
+/*
+|--------------------------------------------------------------------------
+| Призначено мені
+|--------------------------------------------------------------------------
+|
+| Це НЕ обмеження доступу до роботи.
+|
+| Працівник як і раніше може виконувати будь-яке доступне
+| скло своєї дільниці через QR / загальну чергу.
+|
+| Тут лише показуємо замовлення, які майстер окремо призначив:
+| - безпосередньо цьому працівнику;
+| - активній бригаді, учасником якої він є.
+|
+*/
+
+$assignedWork = [];
+
+$assignedWorkStmt = $db->prepare("
+    SELECT
+        osa.id AS assignment_id,
+        osa.assignment_type,
+        osa.employee_id AS responsible_employee_id,
+        osa.work_session_id,
+
+        o.id AS order_id,
+        o.order_number,
+        o.customer_name,
+        o.priority,
+
+        COUNT(g.id) AS glass_count,
+
+        COALESCE(
+            SUM(
+                (
+                    CAST(g.width AS REAL)
+                    *
+                    CAST(g.height AS REAL)
+                    *
+                    CASE
+                        WHEN g.quantity IS NULL
+                             OR g.quantity < 1
+                        THEN 1
+                        ELSE g.quantity
+                    END
+                ) / 1000000.0
+            ),
+            0
+        ) AS total_area
+
+    FROM order_stage_assignments osa
+
+    JOIN orders o
+        ON o.id = osa.order_id
+
+    JOIN glasses g
+        ON g.order_id = o.id
+
+    JOIN route_steps rs
+        ON rs.id = g.current_step_id
+
+    JOIN production_stages ps
+        ON ps.name = rs.name
+
+    WHERE osa.active = 1
+
+      AND osa.status IN (
+          'assigned',
+          'in_progress'
+      )
+
+      AND osa.stage_id = :stage_id
+
+      AND ps.id = :stage_id
+
+      AND g.status = 'waiting'
+
+      AND NOT EXISTS (
+          SELECT 1
+          FROM production_batch_items pbi
+          JOIN production_batches pb
+              ON pb.id = pbi.batch_id
+          WHERE pbi.glass_id = g.id
+            AND pb.status IN (
+                'created',
+                'in_progress'
+            )
+      )
+
+      AND (
+          (
+              osa.assignment_type = 'employee'
+              AND osa.employee_id = :employee_id
+          )
+
+          OR
+
+          (
+              osa.assignment_type = 'brigade'
+
+              AND EXISTS (
+                  SELECT 1
+
+                  FROM work_sessions ws
+
+                  JOIN work_session_members wsm
+                      ON wsm.work_session_id = ws.id
+
+                  WHERE ws.active = 1
+                    AND ws.mode = 'team'
+                    AND ws.stage_id = osa.stage_id
+
+                    /*
+                     * Поки немає окремої стабільної сутності brigade_id,
+                     * вважаємо продовженням тієї ж бригади активну сесію
+                     * з тим самим відповідальним owner.
+                     */
+                    AND ws.owner_employee_id =
+                        osa.employee_id
+
+                    AND wsm.employee_id =
+                        :employee_id
+              )
+          )
+      )
+
+    GROUP BY
+        osa.id,
+        osa.assignment_type,
+        osa.employee_id,
+        osa.work_session_id,
+        o.id,
+        o.order_number,
+        o.customer_name,
+        o.priority
+
+    ORDER BY
+        o.priority DESC,
+        o.id
+");
+
+$assignedWorkStmt->execute([
+    ':stage_id' => $stageId,
+    ':employee_id' => (int)$user['id'],
+]);
+
+$assignedWork =
+    $assignedWorkStmt->fetchAll(
         PDO::FETCH_ASSOC
     );
 
+/*
+|--------------------------------------------------------------------------
+| Скло для призначених замовлень
+|--------------------------------------------------------------------------
+|
+| Використовуємо вже сформовану чергу поточної дільниці.
+| Призначення не блокує інше скло і не змінює логіку QR.
+|
+*/
+
+foreach ($assignedWork as &$assignment) {
+
+    $assignment['glasses'] = [];
+
+    foreach ($queue as $queueItem) {
+
+        $sameOrder = false;
+
+        if (
+            isset($queueItem['order_id'])
+            &&
+            (int)$queueItem['order_id']
+                === (int)$assignment['order_id']
+        ) {
+            $sameOrder = true;
+        }
+
+        /*
+         * Резервне зіставлення за номером замовлення,
+         * якщо order_id не входить у SELECT черги.
+         */
+        if (
+            !$sameOrder
+            &&
+            isset($queueItem['order_number'])
+            &&
+            (string)$queueItem['order_number']
+                === (string)$assignment['order_number']
+        ) {
+            $sameOrder = true;
+        }
+
+        if ($sameOrder) {
+            $assignment['glasses'][] =
+                $queueItem;
+        }
+    }
+}
+
+unset($assignment);
+
+
+
 ?>
+
+
+
+
 <!DOCTYPE html>
 <html lang="uk">
 
@@ -3116,14 +3690,6 @@ $teammates =
 
         .team-member-name {
             display: block;
-            font-weight: 700;
-        }
-
-        .team-member-share {
-            display: block;
-            margin-top: 4px;
-            color: #2563eb;
-            font-size: 18px;
             font-weight: 700;
         }
 
@@ -3440,19 +4006,17 @@ require __DIR__
     <section class="card team-card">
 
         <h2>
-            Режим роботи
+            Бригада
         </h2>
 
         <?php if ($activeTeam): ?>
 
             <div class="team-status">
-
                 <span class="team-dot"></span>
 
                 <strong>
-                    Спільна робота активна
+                    Бригада працює
                 </strong>
-
             </div>
 
             <div class="muted">
@@ -3462,6 +4026,14 @@ require __DIR__
                         stageLabel(
                             $currentStage['name']
                         )
+                    ) ?>
+                </strong>
+
+                · відповідальний:
+                <strong>
+                    <?= e(
+                        $activeTeam['owner_name']
+                        ?? ''
                     ) ?>
                 </strong>
             </div>
@@ -3481,6 +4053,73 @@ require __DIR__
                             ) ?>
                         </span>
 
+                        <?php if (
+                            !empty(
+                                $member['stage_name']
+                            )
+                        ): ?>
+
+                            <span class="muted">
+                                <?= e(
+                                    stageLabel(
+                                        $member['stage_name']
+                                    )
+                                ) ?>
+                            </span>
+
+                        <?php endif; ?>
+
+                        <?php if (
+                            $canManageActiveTeam
+                            &&
+                            (int)$member['id']
+                            !== (int)$activeTeam[
+                                'owner_employee_id'
+                            ]
+                        ): ?>
+
+                            <form
+                                method="post"
+                                style="margin-top:8px"
+                            >
+                                <input
+                                    type="hidden"
+                                    name="csrf_token"
+                                    value="<?= e(
+                                        $csrfToken
+                                    ) ?>"
+                                >
+
+                                <input
+                                    type="hidden"
+                                    name="action"
+                                    value="team_remove_member"
+                                >
+
+                                <input
+                                    type="hidden"
+                                    name="session_id"
+                                    value="<?= (int)
+                                        $activeTeam['id'] ?>"
+                                >
+
+                                <input
+                                    type="hidden"
+                                    name="employee_id"
+                                    value="<?= (int)
+                                        $member['id'] ?>"
+                                >
+
+                                <button
+                                    type="submit"
+                                    class="button button-secondary"
+                                    onclick="return confirm('Вивести працівника з бригади?');"
+                                >
+                                    Вивести
+                                </button>
+                            </form>
+
+                        <?php endif; ?>
 
                     </div>
 
@@ -3489,54 +4128,171 @@ require __DIR__
             </div>
 
             <div class="muted">
-                Усі нові операції на цій дільниці
-                будуть розподілятися між учасниками команди.
+                Нові операції на цій дільниці
+                зараховуються поточному складу бригади.
             </div>
 
-            <form
-                method="post"
-                class="actions"
-            >
+            <?php if (
+                $canManageActiveTeam
+                &&
+                $teammates
+            ): ?>
 
-                <input
-                    type="hidden"
-                    name="csrf_token"
-                    value="<?= e(
-                        $csrfToken
-                    ) ?>"
+                <form
+                    method="post"
+                    class="team-start-form"
                 >
 
-                <input
-                    type="hidden"
-                    name="action"
-                    value="team_end"
+                    <input
+                        type="hidden"
+                        name="csrf_token"
+                        value="<?= e(
+                            $csrfToken
+                        ) ?>"
+                    >
+
+                    <input
+                        type="hidden"
+                        name="action"
+                        value="team_add_member"
+                    >
+
+                    <input
+                        type="hidden"
+                        name="session_id"
+                        value="<?= (int)
+                            $activeTeam['id'] ?>"
+                    >
+
+                    <div class="team-select-wrap">
+
+                        <label for="team_add_employee">
+                            Додати працівника
+                        </label>
+
+                        <select
+                            name="employee_id"
+                            id="team_add_employee"
+                            class="team-select"
+                            required
+                        >
+
+                            <option value="">
+                                Оберіть працівника
+                            </option>
+
+                            <?php foreach (
+                                $teammates
+                                as $teammate
+                            ): ?>
+
+                                <?php if (
+                                    in_array(
+                                        (int)$teammate['id'],
+                                        $currentTeamMemberIds,
+                                        true
+                                    )
+                                ) {
+                                    continue;
+                                } ?>
+
+                                <option
+                                    value="<?= (int)
+                                        $teammate['id'] ?>"
+                                >
+                                    <?= e(
+                                        $teammate['name']
+                                    ) ?>
+
+                                    <?php if (
+                                        !empty(
+                                            $teammate[
+                                                'stage_name'
+                                            ]
+                                        )
+                                    ): ?>
+                                        —
+                                        <?= e(
+                                            stageLabel(
+                                                $teammate[
+                                                    'stage_name'
+                                                ]
+                                            )
+                                        ) ?>
+                                    <?php endif; ?>
+                                </option>
+
+                            <?php endforeach; ?>
+
+                        </select>
+
+                    </div>
+
+                    <button
+                        type="submit"
+                        class="button"
+                    >
+                        Додати
+                    </button>
+
+                </form>
+
+            <?php endif; ?>
+
+            <?php if ($canManageActiveTeam): ?>
+
+                <form
+                    method="post"
+                    class="actions"
+                    style="margin-top:16px"
                 >
 
-                <button
-                    type="submit"
-                    class="button button-secondary"
-                    onclick="return confirm('Завершити спільну роботу?');"
-                >
-                    Завершити спільну роботу
-                </button>
+                    <input
+                        type="hidden"
+                        name="csrf_token"
+                        value="<?= e(
+                            $csrfToken
+                        ) ?>"
+                    >
 
-            </form>
+                    <input
+                        type="hidden"
+                        name="action"
+                        value="team_end"
+                    >
+
+                    <input
+                        type="hidden"
+                        name="session_id"
+                        value="<?= (int)
+                            $activeTeam['id'] ?>"
+                    >
+
+                    <button
+                        type="submit"
+                        class="button button-secondary"
+                        onclick="return confirm('Завершити роботу бригади?');"
+                    >
+                        Завершити бригаду
+                    </button>
+
+                </form>
+
+            <?php endif; ?>
 
         <?php else: ?>
 
             <div class="team-status">
-
                 <span class="team-dot solo"></span>
 
                 <strong>
                     Працюю сам
                 </strong>
-
             </div>
 
             <div class="muted">
-                Зараз ваші операції зараховуються вам на 100%.
-                Якщо працюєте разом — виберіть напарника.
+                Якщо на вашій дільниці працюєте разом,
+                створіть бригаду та оберіть усіх учасників.
             </div>
 
             <?php if ($teammates): ?>
@@ -3562,20 +4318,18 @@ require __DIR__
 
                     <div class="team-select-wrap">
 
-                        <label for="teammate_id">
-                            Напарник
+                        <label for="member_ids">
+                            Учасники бригади
                         </label>
 
                         <select
-                            name="teammate_id"
-                            id="teammate_id"
+                            name="member_ids[]"
+                            id="member_ids"
                             class="team-select"
+                            multiple
+                            size="6"
                             required
                         >
-
-                            <option value="">
-                                Оберіть працівника
-                            </option>
 
                             <?php foreach (
                                 $teammates
@@ -3586,7 +4340,6 @@ require __DIR__
                                     value="<?= (int)
                                         $teammate['id'] ?>"
                                 >
-
                                     <?= e(
                                         $teammate['name']
                                     ) ?>
@@ -3598,7 +4351,6 @@ require __DIR__
                                             ]
                                         )
                                     ): ?>
-
                                         —
                                         <?= e(
                                             stageLabel(
@@ -3607,14 +4359,17 @@ require __DIR__
                                                 ]
                                             )
                                         ) ?>
-
                                     <?php endif; ?>
-
                                 </option>
 
                             <?php endforeach; ?>
 
                         </select>
+
+                        <div class="muted" style="margin-top:6px">
+                            Можна обрати декількох працівників.
+                            Ви додаєтесь до бригади автоматично.
+                        </div>
 
                     </div>
 
@@ -3622,20 +4377,10 @@ require __DIR__
                         type="submit"
                         class="button"
                     >
-                        👥 Почати спільну роботу
+                        Створити бригаду
                     </button>
 
                 </form>
-
-            <?php else: ?>
-
-                <div
-                    class="muted"
-                    style="margin-top:14px;"
-                >
-                    Немає доступних працівників
-                    для спільної роботи.
-                </div>
 
             <?php endif; ?>
 
@@ -4001,6 +4746,310 @@ require __DIR__
             </div>
 
         </div>
+
+    </section>
+
+
+
+    <section class="card">
+
+        <h2>
+            Призначено мені
+        </h2>
+
+        <div
+            style="
+                margin-bottom:14px;
+                color:#64748b;
+                font-size:14px;
+            "
+        >
+            Завдання, які майстер призначив вам
+            особисто або вашій активній бригаді.
+            Інше доступне скло дільниці можна
+            виконувати через загальну чергу.
+        </div>
+
+        <?php if (
+            !$assignedWork
+        ): ?>
+
+            <div class="empty">
+                Окремо призначених завдань немає.
+            </div>
+
+        <?php else: ?>
+
+            <div class="batch-list">
+
+                <?php foreach (
+                    $assignedWork
+                    as $assignment
+                ): ?>
+
+                    <div class="batch-item">
+
+                        <div>
+
+                            <div class="batch-title">
+
+                                Замовлення
+                                <?= e(
+                                    $assignment[
+                                        'order_number'
+                                    ]
+                                ) ?>
+
+                                ·
+
+                                <?= e(
+                                    priorityLabel(
+                                        (int)
+                                        $assignment[
+                                            'priority'
+                                        ]
+                                    )
+                                ) ?>
+
+                            </div>
+
+                            <div class="batch-meta">
+
+                                <?php if (
+                                    !empty(
+                                        $assignment[
+                                            'customer_name'
+                                        ]
+                                    )
+                                ): ?>
+
+                                    <?= e(
+                                        $assignment[
+                                            'customer_name'
+                                        ]
+                                    ) ?>
+
+                                    ·
+
+                                <?php endif; ?>
+
+                                Скло:
+                                <?= (int)
+                                    $assignment[
+                                        'glass_count'
+                                    ] ?>
+
+                                · Площа:
+
+                                <?= number_format(
+                                    (float)
+                                    $assignment[
+                                        'total_area'
+                                    ],
+                                    2,
+                                    ',',
+                                    ' '
+                                ) ?>
+
+                                м²
+
+                                ·
+
+                                <?php if (
+                                    $assignment[
+                                        'assignment_type'
+                                    ] === 'brigade'
+                                ): ?>
+
+                                    Бригада
+
+                                <?php else: ?>
+
+                                    Особисто вам
+
+                                <?php endif; ?>
+
+                            </div>
+
+                            <?php if (
+                                !empty(
+                                    $assignment[
+                                        'glasses'
+                                    ]
+                                )
+                            ): ?>
+
+                                <details
+                                    style="
+                                        margin-top:12px;
+                                    "
+                                >
+
+                                    <summary
+                                        style="
+                                            cursor:pointer;
+                                            font-weight:600;
+                                        "
+                                    >
+                                        Показати скло
+                                        (<?= count(
+                                            $assignment[
+                                                'glasses'
+                                            ]
+                                        ) ?>)
+                                    </summary>
+
+                                    <div
+                                        class="table-wrap"
+                                        style="
+                                            margin-top:12px;
+                                        "
+                                    >
+
+                                        <table>
+
+                                            <thead>
+                                                <tr>
+                                                    <th>#</th>
+                                                    <th>Скло</th>
+                                                    <th>Розмір</th>
+                                                    <th>Товщина</th>
+                                                    <th>Площа</th>
+                                                </tr>
+                                            </thead>
+
+                                            <tbody>
+
+                                            <?php foreach (
+                                                $assignment[
+                                                    'glasses'
+                                                ]
+                                                as $glassIndex =>
+                                                    $glass
+                                            ): ?>
+
+                                                <tr>
+
+                                                    <td>
+                                                        <?= $glassIndex + 1 ?>
+                                                    </td>
+
+                                                    <td>
+
+                                                        <strong>
+                                                            <?= e(
+                                                                $glass[
+                                                                    'code'
+                                                                ]
+                                                            ) ?>
+                                                        </strong>
+
+                                                        <?php if (
+                                                            !empty(
+                                                                $glass[
+                                                                    'glass_type'
+                                                                ]
+                                                            )
+                                                        ): ?>
+
+                                                            <br>
+
+                                                            <small>
+                                                                <?= e(
+                                                                    $glass[
+                                                                        'glass_type'
+                                                                    ]
+                                                                ) ?>
+                                                            </small>
+
+                                                        <?php endif; ?>
+
+                                                    </td>
+
+                                                    <td>
+                                                        <?= (int)
+                                                            $glass[
+                                                                'width'
+                                                            ] ?>
+                                                        ×
+                                                        <?= (int)
+                                                            $glass[
+                                                                'height'
+                                                            ] ?>
+                                                        мм
+                                                    </td>
+
+                                                    <td>
+
+                                                        <?= $glass[
+                                                            'thickness'
+                                                        ] !== null
+                                                            ? e(
+                                                                (string)
+                                                                $glass[
+                                                                    'thickness'
+                                                                ]
+                                                            ) . ' мм'
+                                                            : '—'
+                                                        ?>
+
+                                                    </td>
+
+                                                    <td>
+
+                                                        <?= number_format(
+                                                            (
+                                                                (int)
+                                                                $glass[
+                                                                    'width'
+                                                                ]
+                                                                *
+                                                                (int)
+                                                                $glass[
+                                                                    'height'
+                                                                ]
+                                                                *
+                                                                max(
+                                                                    1,
+                                                                    (int)
+                                                                    $glass[
+                                                                        'quantity'
+                                                                    ]
+                                                                )
+                                                            )
+                                                            / 1000000,
+                                                            2,
+                                                            ',',
+                                                            ' '
+                                                        ) ?>
+
+                                                        м²
+
+                                                    </td>
+
+                                                </tr>
+
+                                            <?php endforeach; ?>
+
+                                            </tbody>
+
+                                        </table>
+
+                                    </div>
+
+                                </details>
+
+                            <?php endif; ?>
+
+                        </div>
+
+                    </div>
+
+                <?php endforeach; ?>
+
+            </div>
+
+        <?php endif; ?>
 
     </section>
 

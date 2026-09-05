@@ -31,7 +31,7 @@ function redirectAfterLogin(
                 => '/work.php',
 
             'manager'
-                => '/production.php',
+                => '/manager.php',
 
             'admin',
             'superadmin'

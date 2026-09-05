@@ -155,7 +155,7 @@ function can_manage_production(?array $user = null): bool
 }
 
 /**
- * Начальник участка.
+ * Майстер дільниці.
  */
 function is_section_manager(?array $user = null): bool
 {

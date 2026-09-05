@@ -229,7 +229,22 @@ $requestedStageId =
         0
     );
 
-if ($canManageProduction) {
+if (
+    is_section_manager($user)
+) {
+
+    /*
+     * Майстер дільниці завжди працює
+     * тільки на своїй закріпленій дільниці.
+     *
+     * Параметр stage_id з URL для нього
+     * ігнорується.
+     */
+
+    $stageId =
+        $userStageId ?? 0;
+
+} elseif ($canManageProduction) {
 
     $stageId =
         $requestedStageId;
@@ -1299,6 +1314,573 @@ if (
     }
 }
 
+
+/*
+|--------------------------------------------------------------------------
+| Призначення замовлення на дільниці
+|--------------------------------------------------------------------------
+*/
+
+if (
+    $_SERVER['REQUEST_METHOD'] === 'POST'
+    &&
+    (
+        $_POST['action']
+        ?? ''
+    ) === 'assign_stage_order'
+) {
+
+    if (
+        !is_section_manager($user)
+    ) {
+        http_response_code(403);
+        exit(
+            'Призначати роботу може тільки Майстер дільниці.'
+        );
+    }
+
+    if (
+        !hash_equals(
+            $csrfToken,
+            $_POST['csrf_token']
+            ?? ''
+        )
+    ) {
+        http_response_code(403);
+        exit(
+            'Помилка перевірки безпеки.'
+        );
+    }
+
+    $assignmentOrderId =
+        (int) (
+            $_POST['order_id']
+            ?? 0
+        );
+
+    $assignmentTarget =
+        trim(
+            (string) (
+                $_POST['assignment_target']
+                ?? ''
+            )
+        );
+
+    try {
+
+        if (
+            $assignmentOrderId <= 0
+        ) {
+            throw new RuntimeException(
+                'Не вибрано замовлення.'
+            );
+        }
+
+        /*
+         * Перевіряємо, що замовлення
+         * дійсно знаходиться на дільниці Майстра.
+         */
+
+        $checkStmt =
+            $db->prepare("
+                SELECT 1
+
+                FROM glasses g
+
+                JOIN route_steps rs
+                    ON rs.id =
+                        g.current_step_id
+
+                JOIN production_stages ps
+                    ON ps.name =
+                        rs.name
+
+                WHERE g.order_id =
+                    :order_id
+
+                  AND ps.id =
+                    :stage_id
+
+                  AND g.status IN (
+                      'waiting',
+                      'in_progress'
+                  )
+
+                LIMIT 1
+            ");
+
+        $checkStmt->execute([
+            ':order_id' =>
+                $assignmentOrderId,
+
+            ':stage_id' =>
+                $stageId,
+        ]);
+
+        if (
+            !$checkStmt->fetchColumn()
+        ) {
+            throw new RuntimeException(
+                'Замовлення вже не знаходиться на цій дільниці.'
+            );
+        }
+
+        $assignmentType = null;
+        $employeeId = null;
+        $workSessionId = null;
+
+        /*
+         * Працівник
+         */
+
+        if (
+            str_starts_with(
+                $assignmentTarget,
+                'employee:'
+            )
+        ) {
+
+            $assignmentType =
+                'employee';
+
+            $employeeId =
+                (int)
+                substr(
+                    $assignmentTarget,
+                    strlen(
+                        'employee:'
+                    )
+                );
+
+            $employeeStmt =
+                $db->prepare("
+                    SELECT
+                        id,
+                        name
+
+                    FROM users
+
+                    WHERE id =
+                        :employee_id
+
+                      AND active = 1
+
+                      AND stage_id =
+                        :stage_id
+
+                      AND role IN (
+                          'employee',
+                          'section_manager'
+                      )
+
+                    LIMIT 1
+                ");
+
+            $employeeStmt->execute([
+                ':employee_id' =>
+                    $employeeId,
+
+                ':stage_id' =>
+                    $stageId,
+            ]);
+
+            if (
+                !$employeeStmt
+                    ->fetch(
+                        PDO::FETCH_ASSOC
+                    )
+            ) {
+                throw new RuntimeException(
+                    'Працівник не належить до цієї дільниці.'
+                );
+            }
+        }
+
+        /*
+         * Бригада
+         */
+
+        elseif (
+            str_starts_with(
+                $assignmentTarget,
+                'brigade:'
+            )
+        ) {
+
+            $assignmentType =
+                'brigade';
+
+            $workSessionId =
+                (int)
+                substr(
+                    $assignmentTarget,
+                    strlen(
+                        'brigade:'
+                    )
+                );
+
+            $brigadeStmt =
+                $db->prepare("
+                    SELECT
+                        id,
+                        owner_employee_id
+
+                    FROM work_sessions
+
+                    WHERE id =
+                        :session_id
+
+                      AND stage_id =
+                        :stage_id
+
+                      AND active = 1
+
+                      AND mode =
+                        'team'
+
+                    LIMIT 1
+                ");
+
+            $brigadeStmt->execute([
+                ':session_id' =>
+                    $workSessionId,
+
+                ':stage_id' =>
+                    $stageId,
+            ]);
+
+            $brigade =
+                $brigadeStmt->fetch(
+                    PDO::FETCH_ASSOC
+                );
+
+            if (
+                !$brigade
+            ) {
+                throw new RuntimeException(
+                    'Бригаду не знайдено або вона вже завершена.'
+                );
+            }
+
+            /*
+             * В employee_id сохраняем
+             * ответственного бригады.
+             */
+
+            $employeeId =
+                (int)
+                $brigade[
+                    'owner_employee_id'
+                ];
+        }
+
+        /*
+         * Пустое значение = снять назначение.
+         */
+
+        elseif (
+            $assignmentTarget !== ''
+            &&
+            $assignmentTarget !== 'none'
+        ) {
+            throw new RuntimeException(
+                'Невідомий тип призначення.'
+            );
+        }
+
+        $db->beginTransaction();
+
+        /*
+         * Закрываем старое назначение заказа
+         * на этой дільниці.
+         */
+
+        $oldStmt =
+            $db->prepare("
+                SELECT
+                    id,
+                    employee_id,
+                    status,
+                    priority
+
+                FROM order_stage_assignments
+
+                WHERE order_id =
+                    :order_id
+
+                  AND stage_id =
+                    :stage_id
+
+                  AND active = 1
+            ");
+
+        $oldStmt->execute([
+            ':order_id' =>
+                $assignmentOrderId,
+
+            ':stage_id' =>
+                $stageId,
+        ]);
+
+        $oldAssignments =
+            $oldStmt->fetchAll(
+                PDO::FETCH_ASSOC
+            );
+
+        foreach (
+            $oldAssignments
+            as $old
+        ) {
+
+            $closeStmt =
+                $db->prepare("
+                    UPDATE order_stage_assignments
+
+                    SET
+                        active = 0,
+                        status = 'cancelled',
+                        ended_at = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+
+                    WHERE id =
+                        :id
+                ");
+
+            $closeStmt->execute([
+                ':id' =>
+                    (int)
+                    $old['id'],
+            ]);
+
+            $historyStmt =
+                $db->prepare("
+                    INSERT INTO order_stage_assignment_history (
+                        assignment_id,
+                        order_id,
+                        stage_id,
+                        employee_id,
+                        action,
+                        old_status,
+                        new_status,
+                        old_priority,
+                        new_priority,
+                        changed_by,
+                        created_at
+                    )
+                    VALUES (
+                        :assignment_id,
+                        :order_id,
+                        :stage_id,
+                        :employee_id,
+                        'unassigned',
+                        :old_status,
+                        'cancelled',
+                        :old_priority,
+                        :new_priority,
+                        :changed_by,
+                        CURRENT_TIMESTAMP
+                    )
+                ");
+
+            $historyStmt->execute([
+                ':assignment_id' =>
+                    (int)
+                    $old['id'],
+
+                ':order_id' =>
+                    $assignmentOrderId,
+
+                ':stage_id' =>
+                    $stageId,
+
+                ':employee_id' =>
+                    (int)
+                    $old['employee_id'],
+
+                ':old_status' =>
+                    $old['status'],
+
+                ':old_priority' =>
+                    (int)
+                    $old['priority'],
+
+                ':new_priority' =>
+                    (int)
+                    $old['priority'],
+
+                ':changed_by' =>
+                    (int)
+                    $user['id'],
+            ]);
+        }
+
+        /*
+         * Новое назначение.
+         */
+
+        if (
+            $employeeId !== null
+        ) {
+
+            $priorityStmt =
+                $db->prepare("
+                    SELECT priority
+
+                    FROM orders
+
+                    WHERE id =
+                        :order_id
+
+                    LIMIT 1
+                ");
+
+            $priorityStmt->execute([
+                ':order_id' =>
+                    $assignmentOrderId,
+            ]);
+
+            $priority =
+                max(
+                    1,
+                    (int)
+                    $priorityStmt
+                        ->fetchColumn()
+                );
+
+            $insertStmt =
+                $db->prepare("
+                    INSERT INTO order_stage_assignments (
+                        order_id,
+                        stage_id,
+                        employee_id,
+                        assigned_by,
+                        status,
+                        priority,
+                        active,
+                        assigned_at,
+                        created_at,
+                        updated_at,
+                        assignment_type,
+                        work_session_id
+                    )
+                    VALUES (
+                        :order_id,
+                        :stage_id,
+                        :employee_id,
+                        :assigned_by,
+                        'assigned',
+                        :priority,
+                        1,
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP,
+                        :assignment_type,
+                        :work_session_id
+                    )
+                ");
+
+            $insertStmt->execute([
+                ':order_id' =>
+                    $assignmentOrderId,
+
+                ':stage_id' =>
+                    $stageId,
+
+                ':employee_id' =>
+                    $employeeId,
+
+                ':assigned_by' =>
+                    (int)
+                    $user['id'],
+
+                ':priority' =>
+                    $priority,
+
+                ':assignment_type' =>
+                    $assignmentType,
+
+                ':work_session_id' =>
+                    $workSessionId,
+            ]);
+
+            $assignmentId =
+                (int)
+                $db->lastInsertId();
+
+            $historyStmt =
+                $db->prepare("
+                    INSERT INTO order_stage_assignment_history (
+                        assignment_id,
+                        order_id,
+                        stage_id,
+                        employee_id,
+                        action,
+                        new_status,
+                        new_priority,
+                        changed_by,
+                        created_at
+                    )
+                    VALUES (
+                        :assignment_id,
+                        :order_id,
+                        :stage_id,
+                        :employee_id,
+                        'assigned',
+                        'assigned',
+                        :priority,
+                        :changed_by,
+                        CURRENT_TIMESTAMP
+                    )
+                ");
+
+            $historyStmt->execute([
+                ':assignment_id' =>
+                    $assignmentId,
+
+                ':order_id' =>
+                    $assignmentOrderId,
+
+                ':stage_id' =>
+                    $stageId,
+
+                ':employee_id' =>
+                    $employeeId,
+
+                ':priority' =>
+                    $priority,
+
+                ':changed_by' =>
+                    (int)
+                    $user['id'],
+            ]);
+        }
+
+        $db->commit();
+
+        header(
+            'Location: /production.php?stage_id='
+            . $stageId
+            . '&mode=single'
+        );
+
+        exit;
+
+    } catch (
+        Throwable $exception
+    ) {
+
+        if (
+            $db->inTransaction()
+        ) {
+            $db->rollBack();
+        }
+
+        $error =
+            'Не вдалося змінити призначення: '
+            . $exception->getMessage();
+    }
+}
+
 /*
 |--------------------------------------------------------------------------
 | Працівники вибраної дільниці
@@ -1336,6 +1918,68 @@ $employees =
 
 /*
 |--------------------------------------------------------------------------
+| Активні бригади дільниці
+|--------------------------------------------------------------------------
+*/
+
+$brigadesStmt =
+    $db->prepare("
+        SELECT
+            ws.id,
+            ws.owner_employee_id,
+
+            owner.name
+                AS owner_name,
+
+            GROUP_CONCAT(
+                member.name,
+                ', '
+            )
+                AS member_names
+
+        FROM work_sessions ws
+
+        JOIN users owner
+            ON owner.id =
+                ws.owner_employee_id
+
+        JOIN work_session_members wsm
+            ON wsm.work_session_id =
+                ws.id
+
+        JOIN users member
+            ON member.id =
+                wsm.employee_id
+
+        WHERE ws.active = 1
+
+          AND ws.mode =
+            'team'
+
+          AND ws.stage_id =
+            :stage_id
+
+        GROUP BY
+            ws.id,
+            ws.owner_employee_id,
+            owner.name
+
+        ORDER BY
+            ws.id
+    ");
+
+$brigadesStmt->execute([
+    ':stage_id' =>
+        $stageId,
+]);
+
+$brigades =
+    $brigadesStmt->fetchAll(
+        PDO::FETCH_ASSOC
+    );
+
+/*
+|--------------------------------------------------------------------------
 | Черга скла
 |--------------------------------------------------------------------------
 */
@@ -1360,6 +2004,18 @@ $queueStmt =
             o.priority,
             o.planned_date,
 
+            osa.employee_id
+                AS assigned_employee_id,
+
+            osa.assignment_type
+                AS assignment_type,
+
+            osa.work_session_id
+                AS assigned_work_session_id,
+
+            assigned_user.name
+                AS assigned_employee_name,
+
             rs.name
                 AS stage_name
 
@@ -1368,6 +2024,30 @@ $queueStmt =
         JOIN orders o
             ON o.id =
                 g.order_id
+
+        LEFT JOIN order_stage_assignments osa
+            ON osa.id = (
+                SELECT osa2.id
+
+                FROM order_stage_assignments osa2
+
+                WHERE osa2.order_id =
+                    o.id
+
+                  AND osa2.stage_id =
+                    :assignment_stage_id
+
+                  AND osa2.active = 1
+
+                ORDER BY
+                    osa2.id DESC
+
+                LIMIT 1
+            )
+
+        LEFT JOIN users assigned_user
+            ON assigned_user.id =
+                osa.employee_id
 
         JOIN route_steps rs
             ON rs.id =
@@ -1422,6 +2102,9 @@ $queueStmt =
 
 $queueStmt->execute([
     ':stage_id' =>
+        $stageId,
+
+    ':assignment_stage_id' =>
         $stageId,
 ]);
 
@@ -2034,6 +2717,8 @@ foreach ($queue as $glass) {
 
     <?php if (
         $canManageProduction
+        &&
+        !is_section_manager($user)
     ): ?>
 
         <section class="card">
@@ -2772,6 +3457,7 @@ foreach ($queue as $glass) {
                                 <th>Пріоритет</th>
                                 <th>Розмір</th>
                                 <th>Товщина</th>
+                                <th>Призначено</th>
                                 <th>Статус</th>
 
                             </tr>
@@ -2880,6 +3566,228 @@ foreach ($queue as $glass) {
                                         ) . ' мм'
                                         : '—'
                                     ?>
+
+                                </td>
+
+                                <td>
+
+                                    <?php if (
+                                        is_section_manager(
+                                            $user
+                                        )
+                                    ): ?>
+
+                                        <form
+                                            method="post"
+                                            style="
+                                                display:flex;
+                                                gap:6px;
+                                                align-items:center;
+                                                min-width:260px;
+                                            "
+                                        >
+
+                                            <input
+                                                type="hidden"
+                                                name="csrf_token"
+                                                value="<?= e(
+                                                    $csrfToken
+                                                ) ?>"
+                                            >
+
+                                            <input
+                                                type="hidden"
+                                                name="action"
+                                                value="assign_stage_order"
+                                            >
+
+                                            <input
+                                                type="hidden"
+                                                name="order_id"
+                                                value="<?= (int)
+                                                    $glass[
+                                                        'order_id'
+                                                    ] ?>"
+                                            >
+
+                                            <?php
+
+                                            $currentTarget =
+                                                'none';
+
+                                            if (
+                                                (
+                                                    $glass[
+                                                        'assignment_type'
+                                                    ]
+                                                    ?? ''
+                                                )
+                                                ===
+                                                'brigade'
+                                                &&
+                                                !empty(
+                                                    $glass[
+                                                        'assigned_work_session_id'
+                                                    ]
+                                                )
+                                            ) {
+
+                                                $currentTarget =
+                                                    'brigade:'
+                                                    .
+                                                    (int)
+                                                    $glass[
+                                                        'assigned_work_session_id'
+                                                    ];
+
+                                            } elseif (
+                                                !empty(
+                                                    $glass[
+                                                        'assigned_employee_id'
+                                                    ]
+                                                )
+                                            ) {
+
+                                                $currentTarget =
+                                                    'employee:'
+                                                    .
+                                                    (int)
+                                                    $glass[
+                                                        'assigned_employee_id'
+                                                    ];
+                                            }
+
+                                            ?>
+
+                                            <select
+                                                name="assignment_target"
+                                                style="
+                                                    min-width:200px;
+                                                "
+                                            >
+
+                                                <option
+                                                    value="none"
+                                                    <?= $currentTarget
+                                                        === 'none'
+                                                        ? 'selected'
+                                                        : ''
+                                                    ?>
+                                                >
+                                                    Не призначено
+                                                </option>
+
+                                                <optgroup
+                                                    label="Працівники"
+                                                >
+
+                                                    <?php foreach (
+                                                        $employees
+                                                        as $employee
+                                                    ): ?>
+
+                                                        <?php
+                                                        $employeeTarget =
+                                                            'employee:'
+                                                            .
+                                                            (int)
+                                                            $employee[
+                                                                'id'
+                                                            ];
+                                                        ?>
+
+                                                        <option
+                                                            value="<?= e(
+                                                                $employeeTarget
+                                                            ) ?>"
+                                                            <?= $currentTarget
+                                                                ===
+                                                                $employeeTarget
+                                                                    ? 'selected'
+                                                                    : ''
+                                                            ?>
+                                                        >
+                                                            <?= e(
+                                                                $employee[
+                                                                    'name'
+                                                                ]
+                                                            ) ?>
+                                                        </option>
+
+                                                    <?php endforeach; ?>
+
+                                                </optgroup>
+
+                                                <?php if (
+                                                    $brigades
+                                                ): ?>
+
+                                                    <optgroup
+                                                        label="Бригади"
+                                                    >
+
+                                                        <?php foreach (
+                                                            $brigades
+                                                            as $brigade
+                                                        ): ?>
+
+                                                            <?php
+                                                            $brigadeTarget =
+                                                                'brigade:'
+                                                                .
+                                                                (int)
+                                                                $brigade[
+                                                                    'id'
+                                                                ];
+                                                            ?>
+
+                                                            <option
+                                                                value="<?= e(
+                                                                    $brigadeTarget
+                                                                ) ?>"
+                                                                <?= $currentTarget
+                                                                    ===
+                                                                    $brigadeTarget
+                                                                        ? 'selected'
+                                                                        : ''
+                                                                ?>
+                                                            >
+                                                                Бригада:
+                                                                <?= e(
+                                                                    $brigade[
+                                                                        'member_names'
+                                                                    ]
+                                                                ) ?>
+                                                            </option>
+
+                                                        <?php endforeach; ?>
+
+                                                    </optgroup>
+
+                                                <?php endif; ?>
+
+                                            </select>
+
+                                            <button
+                                                type="submit"
+                                                class="button button-secondary"
+                                                title="Зберегти призначення"
+                                            >
+                                                ✓
+                                            </button>
+
+                                        </form>
+
+                                    <?php else: ?>
+
+                                        <?= e(
+                                            $glass[
+                                                'assigned_employee_name'
+                                            ]
+                                            ?? 'Не призначено'
+                                        ) ?>
+
+                                    <?php endif; ?>
 
                                 </td>
 

@@ -9,3 +9,5 @@ data/optima-glass.sqlite
 .env
 
 *.before-*
+
+backups/
